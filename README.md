@@ -222,8 +222,24 @@ forge build
 # Tests
 forge test
 
-# Deploy
+# Deploy Stablecoin (paso 1)
 forge script script/DeployStablecoin.s.sol --rpc-url sepolia --broadcast
+
+# Deploy DAO (paso 2) - requiere dirección del Engine
+forge script script/DeployDAO.s.sol --sig "run(address)" <ENGINE_ADDRESS> --rpc-url sepolia --broadcast
+```
+
+### Orden de Deployment
+
+```
+1. DeployStablecoin.s.sol
+   └─ Despliega: TestStableCoin + TestStableCoinEngine
+   └─ Owner del Engine: deployer (temporal)
+
+2. DeployDAO.s.sol (con dirección del Engine)
+   └─ Despliega: TSCGovernanceToken + TSCTimelock + TSCGovernor
+   └─ Configura roles del Timelock
+   └─ Transfiere ownership del Engine al Timelock
 ```
 
 ---

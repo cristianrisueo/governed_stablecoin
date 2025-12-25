@@ -18,6 +18,8 @@ import {HelperConfig} from "./HelperConfig.s.sol";
  * 5. Retorna las direcciones desplegadas
  */
 contract DeployStablecoin is Script {
+    //* Función principal de despliegue
+
     /**
      * @notice Ejecuta el despliegue completo del sistema en Sepolia
      * @dev Esta función se llama automáticamente con `forge script`
@@ -82,7 +84,7 @@ contract DeployStablecoin is Script {
         return (testStableCoin, testStableCoinEngine, helperConfig);
     }
 
-    //* Funciones internas de validación
+    //* Función interna de validación
 
     /**
      * @dev Valida que el despliegue se haya realizado correctamente
