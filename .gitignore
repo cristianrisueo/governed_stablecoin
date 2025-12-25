@@ -14,5 +14,8 @@ docs/
 .env
 
 # Claude docs
-claude/
+.claude/
 CLAUDE.md
+
+# Visual Studio Code settings
+.vscode/

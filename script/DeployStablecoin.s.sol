@@ -2,8 +2,8 @@
 pragma solidity ^0.8.20;
 
 import {Script, console2} from "forge-std/Script.sol";
-import {TestStableCoin} from "../src/TestStableCoin.sol";
-import {TestStableCoinEngine} from "../src/TestStableCoinEngine.sol";
+import {TestStableCoin} from "../src/stablecoin/TestStableCoin.sol";
+import {TestStableCoinEngine} from "../src/stablecoin/TestStableCoinEngine.sol";
 import {HelperConfig} from "./HelperConfig.s.sol";
 
 /**
