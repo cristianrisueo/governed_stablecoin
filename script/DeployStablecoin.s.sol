@@ -48,11 +48,12 @@ contract DeployStablecoin is Script {
         console2.log("TestStableCoin desplegado en:", address(testStableCoin));
         console2.log("");
 
-        // Paso 4: Despliega TestStableCoinEngine
+        // Paso 4: Despliega TestStableCoinEngine con msg.sender como owner inicial
         console2.log("Desplegando TestStableCoinEngine...");
         TestStableCoinEngine testStableCoinEngine =
-            new TestStableCoinEngine(config.wethAddress, address(testStableCoin), config.priceFeedAddress);
+            new TestStableCoinEngine(config.wethAddress, address(testStableCoin), config.priceFeedAddress, msg.sender);
         console2.log("TestStableCoinEngine desplegado en:", address(testStableCoinEngine));
+        console2.log("Owner inicial del Engine:", msg.sender);
         console2.log("");
 
         // Paso 5: Transfiere el ownership del token al Engine. CRÍTICO, el engine debe ser owner

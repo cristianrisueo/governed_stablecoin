@@ -4,6 +4,7 @@ pragma solidity ^0.8.20;
 import {AggregatorV3Interface} from "@chainlink/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {Ownable2Step, Ownable} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 import {TestStableCoin} from "./TestStableCoin.sol";
 import {OracleLib} from "./libraries/OracleLib.sol";
 
@@ -23,11 +24,11 @@ import {OracleLib} from "./libraries/OracleLib.sol";
  * - Uso de Chainlink oracles para pricing en tiempo real
  *
  * IMPORTANTE: Este protocolo es algorítmico y descentralizado.
- * - No tiene gobernanza (por ahora)
- * - No tiene mecanismos de estabilidad adicionales
+ * - Tiene gobernanza on-chain mediante TSCGovernor + TSCTimelock
+ * - Parámetros críticos (liquidation threshold, bonus) son gobernables
  * - Depende completamente de la overcollateralización para mantener el peg
  */
-contract TestStableCoinEngine is ReentrancyGuard {
+contract TestStableCoinEngine is ReentrancyGuard, Ownable2Step {
     //* Errores
 
     /**
@@ -61,46 +62,67 @@ contract TestStableCoinEngine is ReentrancyGuard {
      */
     error TestStableCoinEngine__HealthFactorOk();
 
+    /**
+     * @dev Error que se lanza cuando se intenta configurar parámetros de gobernanza con valores inválidos
+     */
+    error TestStableCoinEngine__InvalidGovernanceParameter();
+
     //* Tipos
 
     using OracleLib for AggregatorV3Interface;
 
     //* Variables de Estado
 
-    /**
-     * @dev Umbral de liquidación: 50 significa 50%
-     * Esto se traduce en 200% de colateralización requerida
-     * Ejemplo: $100 de colateral permite acuñar máximo $50 de TSC
-     */
-    uint256 private constant LIQUIDATION_THRESHOLD = 50;
-
-    /**
-     * @dev Bonus que recibe el liquidador: 10 significa 10%
-     * Incentiva a los liquidadores a mantener el protocolo solvente
-     */
-    uint256 private constant LIQUIDATION_BONUS = 10;
-
-    /**
-     * @dev Precisión para el cálculo del bonus de liquidación
-     */
-    uint256 private constant LIQUIDATION_PRECISION = 100;
+    //* Constantes Inmutables (no gobernables por seguridad)
 
     /**
      * @dev Factor de salud mínimo permitido (con 18 decimales)
      * 1e18 = 1.0, por debajo de esto la posición puede ser liquidada
+     * INMUTABLE: Cambiar esto podría causar liquidaciones masivas o insolvencia
      */
     uint256 private constant MIN_HEALTH_FACTOR = 1e18;
 
     /**
      * @dev Precisión usada en todos los cálculos (18 decimales)
+     * INMUTABLE: Cambiar esto rompería todos los cálculos del protocolo
      */
     uint256 private constant PRECISION = 1e18;
 
     /**
      * @dev Número de decimales adicionales del price feed de Chainlink
      * ETH/USD price feed retorna precios con 8 decimales. Añadimos 10
+     * INMUTABLE: Depende del formato del oracle, no debe cambiar
      */
     uint256 private constant ADDITIONAL_FEED_PRECISION = 1e10;
+
+    /**
+     * @dev Precisión para el cálculo del bonus de liquidación
+     * INMUTABLE: Base matemática, no debe cambiar
+     */
+    uint256 private constant LIQUIDATION_PRECISION = 100;
+
+    //* Parámetros Gobernables (pueden ser modificados por gobernanza)
+
+    /**
+     * @dev Umbral de liquidación: 50 significa 50%
+     * Esto se traduce en 200% de colateralización requerida
+     * Ejemplo: $100 de colateral permite acuñar máximo $50 de TSC
+     *
+     * GOBERNABLE: La gobernanza puede ajustar entre 20-80 para gestionar riesgo
+     * - Más alto = protocolo más seguro, menos capital efficient
+     * - Más bajo = protocolo más arriesgado, más capital efficient
+     */
+    uint256 private s_liquidationThreshold = 50;
+
+    /**
+     * @dev Bonus que recibe el liquidador: 10 significa 10%
+     * Incentiva a los liquidadores a mantener el protocolo solvente
+     *
+     * GOBERNABLE: La gobernanza puede ajustar entre 5-20 para optimizar incentivos
+     * - Más alto = más incentivo para liquidadores, más costoso para liquidados
+     * - Más bajo = menos incentivo, riesgo de liquidaciones lentas
+     */
+    uint256 private s_liquidationBonus = 10;
 
     /**
      * @dev Mapeo de usuario a cantidad de WETH depositado como colateral
@@ -152,6 +174,20 @@ contract TestStableCoinEngine is ReentrancyGuard {
      */
     event BadDebtDetected(address indexed user, uint256 totalDebt, uint256 collateralAvailable);
 
+    /**
+     * @dev Emitido cuando la gobernanza actualiza el umbral de liquidación
+     * @param oldThreshold Valor anterior del threshold
+     * @param newThreshold Nuevo valor del threshold
+     */
+    event LiquidationThresholdUpdated(uint256 oldThreshold, uint256 newThreshold);
+
+    /**
+     * @dev Emitido cuando la gobernanza actualiza el bonus de liquidación
+     * @param oldBonus Valor anterior del bonus
+     * @param newBonus Nuevo valor del bonus
+     */
+    event LiquidationBonusUpdated(uint256 oldBonus, uint256 newBonus);
+
     //* Modifiers
 
     /**
@@ -173,8 +209,11 @@ contract TestStableCoinEngine is ReentrancyGuard {
      * @param wethAddress Dirección del contrato WETH en la red
      * @param tscAddress Dirección del contrato TestStableCoin
      * @param priceFeedAddress Dirección del Chainlink price feed WETH/USD
+     * @param initialOwner Dirección del owner inicial (el Timelock para gobernanza)
      */
-    constructor(address wethAddress, address tscAddress, address priceFeedAddress) {
+    constructor(address wethAddress, address tscAddress, address priceFeedAddress, address initialOwner)
+        Ownable(initialOwner)
+    {
         if (wethAddress == address(0) || tscAddress == address(0) || priceFeedAddress == address(0)) {
             revert TestStableCoinEngine__InvalidAddress();
         }
@@ -280,7 +319,7 @@ contract TestStableCoinEngine is ReentrancyGuard {
 
         uint256 totalDebt = s_stablecoinMinted[user];
         uint256 tokenAmountFromDebt = getTokenAmountFromUsd(totalDebt);
-        uint256 bonusCollateral = (tokenAmountFromDebt * LIQUIDATION_BONUS) / LIQUIDATION_PRECISION;
+        uint256 bonusCollateral = (tokenAmountFromDebt * s_liquidationBonus) / LIQUIDATION_PRECISION;
         uint256 totalCollateralToRedeem = tokenAmountFromDebt + bonusCollateral;
 
         // Este check es súper importante para evitar bad debt. Si el colateral del usuario no alcanza
@@ -374,12 +413,12 @@ contract TestStableCoinEngine is ReentrancyGuard {
      */
     function _calculateHealthFactor(uint256 totalTscMinted, uint256 collateralValueInUsd)
         internal
-        pure
+        view
         returns (uint256)
     {
         if (totalTscMinted == 0) return type(uint256).max;
 
-        uint256 collateralAdjustedForThreshold = (collateralValueInUsd * LIQUIDATION_THRESHOLD) / LIQUIDATION_PRECISION;
+        uint256 collateralAdjustedForThreshold = (collateralValueInUsd * s_liquidationThreshold) / LIQUIDATION_PRECISION;
 
         return (collateralAdjustedForThreshold * PRECISION) / totalTscMinted;
     }
@@ -396,7 +435,59 @@ contract TestStableCoinEngine is ReentrancyGuard {
         }
     }
 
-    //* Funciones de view públicas y externas (Helpers y getters)
+    //* Setters de Gobernanza (solo owner = Timelock)
+
+    /**
+     * @notice Actualiza el umbral de liquidación (solo owner/gobernanza)
+     * @param newThreshold Nuevo umbral de liquidación (20-80 recomendado)
+     * @dev Solo puede ser llamado por el owner (Timelock via gobernanza)
+     *
+     * VALIDACIONES:
+     * - Debe estar entre 20 y 80 (125%-500% collateralization ratio)
+     * - Muy bajo (<20) = riesgo de insolvencia sistémica
+     * - Muy alto (>80) = protocolo poco capital efficient
+     *
+     * EJEMPLO:
+     * - newThreshold = 40 → 250% collateralization ratio (más seguro)
+     * - newThreshold = 60 → 167% collateralization ratio (más arriesgado)
+     */
+    function updateLiquidationThreshold(uint256 newThreshold) external onlyOwner {
+        if (newThreshold < 20 || newThreshold > 80) {
+            revert TestStableCoinEngine__InvalidGovernanceParameter();
+        }
+
+        uint256 oldThreshold = s_liquidationThreshold;
+        s_liquidationThreshold = newThreshold;
+
+        emit LiquidationThresholdUpdated(oldThreshold, newThreshold);
+    }
+
+    /**
+     * @notice Actualiza el bonus de liquidación (solo owner/gobernanza)
+     * @param newBonus Nuevo bonus para liquidadores (5-20 recomendado)
+     * @dev Solo puede ser llamado por el owner (Timelock via gobernanza)
+     *
+     * VALIDACIONES:
+     * - Debe estar entre 5 y 20 (5%-20% bonus)
+     * - Muy bajo (<5) = poco incentivo para liquidadores → liquidaciones lentas
+     * - Muy alto (>20) = muy costoso para usuarios liquidados
+     *
+     * EJEMPLO:
+     * - newBonus = 5 → liquidador recibe 5% extra
+     * - newBonus = 15 → liquidador recibe 15% extra (más incentivo)
+     */
+    function updateLiquidationBonus(uint256 newBonus) external onlyOwner {
+        if (newBonus < 5 || newBonus > 20) {
+            revert TestStableCoinEngine__InvalidGovernanceParameter();
+        }
+
+        uint256 oldBonus = s_liquidationBonus;
+        s_liquidationBonus = newBonus;
+
+        emit LiquidationBonusUpdated(oldBonus, newBonus);
+    }
+
+    //* Helpers y getters
 
     /**
      * @notice Convierte una cantidad de WETH a su valor en USD
@@ -474,19 +565,19 @@ contract TestStableCoinEngine is ReentrancyGuard {
     }
 
     /**
-     * @notice Obtiene el umbral de liquidación
-     * @return El umbral (50 = 50%)
+     * @notice Obtiene el umbral de liquidación actual
+     * @return El umbral (50 = 50% = 200% collateralization ratio)
      */
-    function getLiquidationThreshold() external pure returns (uint256) {
-        return LIQUIDATION_THRESHOLD;
+    function getLiquidationThreshold() external view returns (uint256) {
+        return s_liquidationThreshold;
     }
 
     /**
-     * @notice Obtiene el bonus de liquidación
+     * @notice Obtiene el bonus de liquidación actual
      * @return El bonus (10 = 10%)
      */
-    function getLiquidationBonus() external pure returns (uint256) {
-        return LIQUIDATION_BONUS;
+    function getLiquidationBonus() external view returns (uint256) {
+        return s_liquidationBonus;
     }
 
     /**

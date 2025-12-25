@@ -1,66 +1,237 @@
-## Foundry
+# TSC - Test Stablecoin Protocol
 
-**Foundry is a blazing fast, portable and modular toolkit for Ethereum application development written in Rust.**
+Protocolo de stablecoin algorítmica overcollateralizada con gobernanza on-chain. Similar a MakerDAO/DAI.
 
-Foundry consists of:
+## Arquitectura del Sistema
 
-- **Forge**: Ethereum testing framework (like Truffle, Hardhat and DappTools).
-- **Cast**: Swiss army knife for interacting with EVM smart contracts, sending transactions and getting chain data.
-- **Anvil**: Local Ethereum node, akin to Ganache, Hardhat Network.
-- **Chisel**: Fast, utilitarian, and verbose solidity REPL.
-
-## Documentation
-
-https://book.getfoundry.sh/
-
-## Usage
-
-### Build
-
-```shell
-$ forge build
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                      GOBERNANZA (DAO)                           │
+│  ┌──────────────────┐    ┌─────────────┐    ┌───────────────┐  │
+│  │ TSCGovernanceToken│───▶│ TSCGovernor │───▶│  TSCTimeLock  │  │
+│  │   (Voting Power)  │    │ (Votación)  │    │ (Delay 2 días)│  │
+│  └──────────────────┘    └─────────────┘    └───────┬───────┘  │
+└─────────────────────────────────────────────────────┼──────────┘
+                                                      │ owner
+                                                      ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                     PROTOCOLO STABLECOIN                        │
+│  ┌──────────────────────────────────────────────────────────┐  │
+│  │              TestStableCoinEngine                         │  │
+│  │  - Depósitos/Retiros de WETH                             │  │
+│  │  - Minteo/Burning de TSC                                 │  │
+│  │  - Liquidaciones                                          │  │
+│  │  - Cálculo de Health Factor                              │  │
+│  └──────────────────────┬───────────────────────────────────┘  │
+│                         │ owner                                 │
+│                         ▼                                       │
+│  ┌──────────────────────────────────────────────────────────┐  │
+│  │              TestStableCoin (ERC20)                       │  │
+│  │  - Solo el Engine puede mint/burn                        │  │
+│  └──────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  Chainlink Oracle (ETH/USD) + OracleLib (protección 3h stale)  │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-### Test
+---
 
-```shell
-$ forge test
+## Flujo de Minteo (Acuñar TSC)
+
+```
+Usuario quiere acuñar 100 TSC
+
+1. depositCollateralAndMintTsc(wethAmount, tscAmount)
+   │
+   ├─▶ depositCollateral(wethAmount)
+   │   └─ Transfiere WETH del usuario al Engine
+   │   └─ s_collateralDeposited[user] += wethAmount
+   │
+   └─▶ mintTsc(tscAmount)
+       └─ Verifica Health Factor >= 1.0
+       └─ s_stablecoinMinted[user] += tscAmount
+       └─ TestStableCoin.mint(user, tscAmount)
+       └─ Usuario recibe TSC
 ```
 
-### Format
+**Requisito:** Ratio de colateralización mínimo 200% (por defecto)
+- Para acuñar $100 TSC → necesitas $200 en WETH
 
-```shell
-$ forge fmt
+---
+
+## Flujo de Burning (Quemar TSC)
+
+```
+Usuario quiere recuperar su WETH
+
+1. redeemCollateralForTsc(wethAmount, tscAmount)
+   │
+   ├─▶ burnTsc(tscAmount)
+   │   └─ Usuario envía TSC al Engine
+   │   └─ Engine quema el TSC
+   │   └─ s_stablecoinMinted[user] -= tscAmount
+   │
+   └─▶ redeemCollateral(wethAmount)
+       └─ Verifica Health Factor >= 1.0 post-retiro
+       └─ s_collateralDeposited[user] -= wethAmount
+       └─ Transfiere WETH al usuario
 ```
 
-### Gas Snapshots
+---
 
-```shell
-$ forge snapshot
+## Health Factor
+
+```
+                    Valor Colateral (USD) × Liquidation Threshold
+Health Factor = ─────────────────────────────────────────────────
+                              Deuda Total (TSC)
+
+Ejemplo:
+- Colateral: 1 WETH = $2,000
+- Deuda: 800 TSC
+- Threshold: 50%
+
+HF = ($2,000 × 0.5) / $800 = $1,000 / $800 = 1.25 ✓ SEGURO
+
+Si ETH baja a $1,500:
+HF = ($1,500 × 0.5) / $800 = $750 / $800 = 0.93 ✗ LIQUIDABLE
 ```
 
-### Anvil
+**HF < 1.0** = Posición puede ser liquidada
 
-```shell
-$ anvil
+---
+
+## Flujo de Liquidación
+
+```
+Cuando Health Factor < 1.0, cualquiera puede liquidar:
+
+liquidate(userAddress, debtToCover)
+│
+├─▶ Verificar HF < 1.0 (si no, revert)
+│
+├─▶ Calcular colateral a recibir
+│   └─ colateral = debtToCover + (debtToCover × bonus)
+│   └─ Bonus por defecto: 10%
+│
+├─▶ Liquidador paga deuda (envía TSC)
+│   └─ Se quema el TSC
+│
+└─▶ Liquidador recibe colateral (WETH)
+    └─ Obtiene ganancia del 10%
 ```
 
-### Deploy
+**Ejemplo:**
+- Usuario: 1 WETH ($1,500), deuda 800 TSC, HF = 0.93
+- Liquidador paga: 800 TSC
+- Liquidador recibe: ~$880 en WETH (800 + 10% bonus)
 
-```shell
-$ forge script script/Counter.s.sol:CounterScript --rpc-url <your_rpc_url> --private-key <your_private_key>
+---
+
+## Sistema de Gobernanza
+
+### Flujo de una Propuesta
+
+```
+1. PROPONER
+   └─ Requiere >= 1000 TSCG tokens
+   └─ Ejemplo: "Cambiar liquidation threshold a 60%"
+
+2. ESPERAR
+   └─ Voting Delay: 1 bloque
+
+3. VOTAR
+   └─ Período: ~1 semana (50,400 bloques)
+   └─ Opciones: For / Against / Abstain
+   └─ Quorum requerido: 5% del supply
+
+4. ENCOLAR (si aprobada)
+   └─ Se envía al TimeLock
+
+5. ESPERAR DELAY
+   └─ 2 días de seguridad
+   └─ Permite a usuarios retirarse si no están de acuerdo
+
+6. EJECUTAR
+   └─ Cualquiera puede ejecutar
+   └─ TimeLock llama al Engine con los nuevos parámetros
 ```
 
-### Cast
+### Parámetros Gobernables
 
-```shell
-$ cast <subcommand>
+| Parámetro | Valor Actual | Rango | Descripción |
+|-----------|-------------|-------|-------------|
+| Liquidation Threshold | 50 | 20-80 | % de colateral válido como respaldo |
+| Liquidation Bonus | 10 | 5-20 | % incentivo para liquidadores |
+
+---
+
+## Estructura de Contratos
+
+```
+src/
+├── stablecoin/
+│   ├── TestStableCoin.sol           # Token ERC20 de la stablecoin
+│   ├── TestStableCoinEngine.sol     # Lógica principal del protocolo
+│   └── libraries/
+│       └── OracleLib.sol            # Protección contra precios obsoletos
+│
+└── governance/
+    ├── TSCGovernanceToken.sol       # Token de votación (ERC20Votes)
+    ├── TSCGovernor.sol              # Contrato de votación
+    └── TSCTimeLock.sol              # Delay de seguridad (2 días)
 ```
 
-### Help
+---
 
-```shell
-$ forge --help
-$ anvil --help
-$ cast --help
+## Direcciones en Sepolia
+
+| Contrato | Dirección |
+|----------|-----------|
+| WETH | `0x7b79995e5f793A07Bc00c21412e50Ecae098E7f9` |
+| ETH/USD Chainlink | `0x694AA1769357215DE4FAC081bf1f309aDC325306` |
+
+---
+
+## Ownership y Permisos
+
 ```
+TSCGovernanceToken
+     │ (vota)
+     ▼
+TSCGovernor ───▶ TSCTimeLock ───▶ TestStableCoinEngine ───▶ TestStableCoin
+                 (owner)          (owner)
+```
+
+- **TestStableCoin**: Solo el Engine puede mint/burn
+- **TestStableCoinEngine**: Solo el TimeLock puede cambiar parámetros
+- **TSCTimeLock**: Solo el Governor puede proponer cambios
+- **TSCGovernor**: Holders de TSCGovernanceToken votan
+
+---
+
+## Comandos Útiles
+
+```bash
+# Compilar
+forge build
+
+# Tests
+forge test
+
+# Deploy
+forge script script/DeployStablecoin.s.sol --rpc-url sepolia --broadcast
+```
+
+---
+
+## Seguridad
+
+- **ReentrancyGuard**: Todas las funciones de mutación
+- **Ownable2Step**: Transferencia de ownership en 2 pasos
+- **OracleLib**: Revierte si precio > 3 horas de antigüedad
+- **Health Factor**: Siempre verificado antes de permitir operaciones
+- **TimeLock**: 2 días de delay para cambios críticos
