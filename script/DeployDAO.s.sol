@@ -23,8 +23,8 @@ import {TestStableCoinEngine} from "../src/stablecoin/TestStableCoinEngine.sol";
  *
  * IMPORTANTE:
  * - Este script requiere la dirección del TestStableCoinEngine ya desplegado
- * - El deployer debe ser el owner actual del Engine
- * - Después de ejecutar, el Timelock será el pending owner del Engine
+ * - El deployer debe ser el owner actual del Engine para transferir ownership
+ * - Después de ejecutar, el Timelock será el owner del Engine
  */
 contract DeployDAO is Script {
     //* Configuración de Gobernanza
@@ -128,18 +128,18 @@ contract DeployDAO is Script {
         // Paso 6: Configura roles del Timelock
         console2.log("Configurando roles del Timelock...");
 
-        // 6.1: Dar PROPOSER_ROLE al Governor
+        // 6.1: Asigna PROPOSER_ROLE al Governor
         bytes32 proposerRole = timelock.PROPOSER_ROLE();
         timelock.grantRole(proposerRole, address(governor));
         console2.log("  [OK] PROPOSER_ROLE asignado al Governor");
 
-        // 6.2: Revocar ADMIN_ROLE del deployer (descentralización completa)
+        // 6.2: Revoca ADMIN_ROLE del deployer (descentralización completa)
         bytes32 adminRole = timelock.DEFAULT_ADMIN_ROLE();
         timelock.revokeRole(adminRole, msg.sender);
         console2.log("  [OK] ADMIN_ROLE revocado del deployer");
         console2.log("");
 
-        // Paso 7: Transferir ownership del Engine al Timelock
+        // Paso 7: Transfiere el ownership del Engine al Timelock
         console2.log("Transfiriendo ownership del Engine al Timelock...");
         engine.transferOwnership(address(timelock));
         console2.log("  [OK] Transferencia iniciada (Ownable2Step - pendiente de aceptacion)");
