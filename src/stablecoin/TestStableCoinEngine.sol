@@ -106,13 +106,6 @@ contract TestStableCoinEngine is ReentrancyGuard, Ownable {
      */
     uint256 private constant LIQUIDATION_PRECISION = 100;
 
-    /**
-     * @dev Health factor objetivo a restaurar tras liquidación parcial
-     * 1.25e18 = 1.25 con precisión de 18 decimales
-     * Proporciona un buffer de seguridad por encima del mínimo (1.0)
-     */
-    uint256 private constant TARGET_HEALTH_FACTOR = 1.25e18;
-
     //* Parámetros Gobernables (pueden ser modificados por gobernanza)
 
     /**
@@ -135,6 +128,17 @@ contract TestStableCoinEngine is ReentrancyGuard, Ownable {
      * - Más bajo = menos incentivo, riesgo de liquidaciones lentas
      */
     uint256 private s_liquidationBonus = 10;
+
+    /**
+     * @dev Health factor objetivo a restaurar tras liquidación parcial
+     * 1.25e18 = 1.25 con precisión de 18 decimales
+     * Proporciona un buffer de seguridad por encima del mínimo (1.0)
+     *
+     * GOBERNABLE: La gobernanza puede ajustar entre 1.1 - 1.5 para gestionar agresividad de liquidación
+     * - Más alto (1.5) = liquidaciones más agresivas, mayor buffer de seguridad
+     * - Más bajo (1.1) = liquidaciones más conservadoras, menor impacto en usuarios
+     */
+    uint256 private s_targetHealthFactor = 1.25e18;
 
     /**
      * @dev Mapeo de usuario a cantidad de WETH depositado como colateral
@@ -199,6 +203,13 @@ contract TestStableCoinEngine is ReentrancyGuard, Ownable {
      * @param newBonus Nuevo valor del bonus
      */
     event LiquidationBonusUpdated(uint256 oldBonus, uint256 newBonus);
+
+    /**
+     * @dev Emitido cuando la gobernanza actualiza el target health factor
+     * @param oldTarget Valor anterior del target health factor
+     * @param newTarget Nuevo valor del target health factor
+     */
+    event TargetHealthFactorUpdated(uint256 oldTarget, uint256 newTarget);
 
     //* Modifiers
 
@@ -338,8 +349,10 @@ contract TestStableCoinEngine is ReentrancyGuard, Ownable {
         // Calcula la deuda parcial a cubrir para alcanzar el HF objetivo
         uint256 debtToCover = _calculateDebtToCover(totalDebt, totalCollateralValue);
 
-        // Convierte la deuda a cubir en colateral, calcula el bonus y el colateral total que se redime
+        // Convierte la deuda a cubir en colateral
         uint256 tokenAmountFromDebt = getTokenAmountFromUsd(debtToCover);
+
+        // Calcula el bonus para el liquidador y la cantidad total de colateral a rescatar
         uint256 bonusCollateral = (tokenAmountFromDebt * s_liquidationBonus) / LIQUIDATION_PRECISION;
         uint256 totalCollateralToRedeem = tokenAmountFromDebt + bonusCollateral;
 
@@ -455,7 +468,7 @@ contract TestStableCoinEngine is ReentrancyGuard, Ownable {
      * @dev Calcula la cantidad de deuda a cubrir para restaurar el health factor del usuario al objetivo
      * @param totalDebt Deuda total del usuario en USD (18 decimales)
      * @param totalCollateralValue Valor total del colateral en USD (18 decimales)
-     * @return debtToCover Cantidad de deuda a cubrir en USD para alcanzar TARGET_HEALTH_FACTOR
+     * @return debtToCover Cantidad de deuda a cubrir en USD para alcanzar s_targetHealthFactor
      *
      * Derivación de la fórmula:
      * Objetivo: (colateral_final × threshold) / deuda_final = target HF
@@ -473,7 +486,7 @@ contract TestStableCoinEngine is ReentrancyGuard, Ownable {
 
         // Numerador: collateralValue × threshold - totalDebt × targetHF
         uint256 numerator = (totalCollateralValue * thresholdMultiplier) / PRECISION;
-        uint256 debtComponent = (totalDebt * TARGET_HEALTH_FACTOR) / PRECISION;
+        uint256 debtComponent = (totalDebt * s_targetHealthFactor) / PRECISION;
 
         // Si el numerador es negativo, no se necesita liquidación
         if (numerator <= debtComponent) {
@@ -486,11 +499,11 @@ contract TestStableCoinEngine is ReentrancyGuard, Ownable {
         uint256 thresholdWithBonus = (thresholdMultiplier * bonusMultiplier) / PRECISION;
 
         // Si el denominador es negativo o cero, algo está mal
-        if (TARGET_HEALTH_FACTOR <= thresholdWithBonus) {
+        if (s_targetHealthFactor <= thresholdWithBonus) {
             return totalDebt; // Liquidar todo como fallback
         }
 
-        uint256 denominator = TARGET_HEALTH_FACTOR - thresholdWithBonus;
+        uint256 denominator = s_targetHealthFactor - thresholdWithBonus;
 
         // Calcular deuda a cubrir
         uint256 debtToCover = (numerator * PRECISION) / denominator;
@@ -565,6 +578,31 @@ contract TestStableCoinEngine is ReentrancyGuard, Ownable {
         s_liquidationBonus = newBonus;
 
         emit LiquidationBonusUpdated(oldBonus, newBonus);
+    }
+
+    /**
+     * @notice Actualiza el target health factor (solo owner/gobernanza)
+     * @param newTarget Nuevo target health factor (1.1e18-1.5e18 recomendado)
+     * @dev Solo puede ser llamado por el owner (Timelock via gobernanza)
+     *
+     * VALIDACIONES:
+     * - Debe estar entre 1.1e18 y 1.5e18 (1.1 - 1.5 con 18 decimales)
+     * - Muy bajo (<1.1) = poco margen de seguridad
+     * - Muy alto (>1.5) = mayor impacto en usuarios
+     *
+     * EJEMPLO:
+     * - newTarget = 1.1e18 → restaura HF a 1.1 (más conservador, menor impacto)
+     * - newTarget = 1.5e18 → restaura HF a 1.5 (más agresivo, mayor seguridad)
+     */
+    function updateTargetHealthFactor(uint256 newTarget) external onlyOwner {
+        if (newTarget < 1.1e18 || newTarget > 1.5e18) {
+            revert TestStableCoinEngine__InvalidGovernanceParameter();
+        }
+
+        uint256 oldTarget = s_targetHealthFactor;
+        s_targetHealthFactor = newTarget;
+
+        emit TargetHealthFactorUpdated(oldTarget, newTarget);
     }
 
     //* Helpers y getters
@@ -658,6 +696,14 @@ contract TestStableCoinEngine is ReentrancyGuard, Ownable {
      */
     function getLiquidationBonus() external view returns (uint256) {
         return s_liquidationBonus;
+    }
+
+    /**
+     * @notice Obtiene el target health factor actual
+     * @return El target health factor (1.25e18 = 1.25)
+     */
+    function getTargetHealthFactor() external view returns (uint256) {
+        return s_targetHealthFactor;
     }
 
     /**
