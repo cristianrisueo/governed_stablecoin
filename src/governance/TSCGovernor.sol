@@ -64,7 +64,7 @@ contract TSCGovernor is
     /**
      * @notice Constructor que inicializa el Governor con todos sus parámetros
      * @param token Dirección del token de governance (TSCGovernanceToken)
-     * @param timelock Dirección del Timelock contract
+     * @param timelock Dirección del Timelock contract (TSCTimelock)
      * @param initialVotingDelay Bloques de espera antes de que comience la votación (dev: 1, pro: 7200 = 1 día)
      * @param initialVotingPeriod Bloques de duración de la votación (dev: 3, pro: 50400 = 1 semana)
      * @param initialProposalThreshold Tokens mínimos requeridos para crear propuesta (dev: 0, pro: 1000 TSCG)

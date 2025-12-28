@@ -5,7 +5,9 @@ import {Script, console2} from "forge-std/Script.sol";
 import {TSCGovernanceToken} from "../src/governance/TSCGovernanceToken.sol";
 import {TSCTimelock} from "../src/governance/TSCTimeLock.sol";
 import {TSCGovernor} from "../src/governance/TSCGovernor.sol";
+import {TSCGTreasury} from "../src/governance/TSCGTreasury.sol";
 import {TestStableCoinEngine} from "../src/stablecoin/TestStableCoinEngine.sol";
+import {HelperConfig} from "./HelperConfig.s.sol";
 
 /**
  * @title DeployDAO
@@ -65,6 +67,18 @@ contract DeployDAO is Script {
      */
     uint256 public constant QUORUM_PERCENTAGE = 5;
 
+    /**
+     * @dev Precio inicial de TSCG: 0.001 WETH por token
+     * 1 TSCG = 0.001 WETH (1e15 wei)
+     */
+    uint256 public constant INITIAL_TSCG_PRICE = 0.001 ether;
+
+    /**
+     * @dev Asignación inicial de TSCG al Treasury: 550,000 tokens (55% del supply)
+     * Estos tokens estarán disponibles para compra por usuarios
+     */
+    uint256 public constant TREASURY_TSCG_ALLOCATION = 550_000 ether;
+
     //* Función principal de despliegue
 
     /**
@@ -74,10 +88,11 @@ contract DeployDAO is Script {
      * @return governanceToken Contrato del token de gobernanza desplegado
      * @return timelock Contrato del Timelock desplegado
      * @return governor Contrato del Governor desplegado
+     * @return treasury Contrato del Treasury para distribución de TSCG desplegado
      */
     function run(address engineAddress)
         external
-        returns (TSCGovernanceToken governanceToken, TSCTimelock timelock, TSCGovernor governor)
+        returns (TSCGovernanceToken governanceToken, TSCTimelock timelock, TSCGovernor governor, TSCGTreasury treasury)
     {
         // Paso 1: Obtiene referencia al Engine
         TestStableCoinEngine engine = TestStableCoinEngine(engineAddress);
@@ -139,17 +154,43 @@ contract DeployDAO is Script {
         console2.log("  [OK] ADMIN_ROLE revocado del deployer");
         console2.log("");
 
-        // Paso 7: Transfiere el ownership del Engine al Timelock
-        console2.log("Transfiriendo ownership del Engine al Timelock...");
-        engine.transferOwnership(address(timelock));
-        console2.log("  [OK] Ownership transferido exitosamente");
+        // Paso 7: Despliega TSCGTreasury
+        console2.log("Desplegando TSCGTreasury...");
+
+        // Obtiene dirección WETH desde HelperConfig
+        HelperConfig helperConfig = new HelperConfig();
+        (address wethAddress,) = helperConfig.activeNetworkConfig();
+
+        treasury = new TSCGTreasury(address(governanceToken), wethAddress, INITIAL_TSCG_PRICE);
+        console2.log("  TSCGTreasury desplegado en:", address(treasury));
+        console2.log("  WETH address:", wethAddress);
+        console2.log("  Precio inicial TSCG:", INITIAL_TSCG_PRICE, "wei (0.001 WETH)");
         console2.log("");
 
-        // Paso 8: Finaliza el broadcast
+        // Paso 8: Transfiere TSCG al Treasury
+        console2.log("Transfiriendo TSCG al Treasury...");
+        bool transferSuccess = governanceToken.transfer(address(treasury), TREASURY_TSCG_ALLOCATION);
+        require(transferSuccess, "Transfer de TSCG al Treasury fallo");
+        console2.log("  [OK]", TREASURY_TSCG_ALLOCATION / 1e18, "TSCG transferidos al Treasury");
+        console2.log("");
+
+        // Paso 9: Transfiere ownership del Treasury al Timelock
+        console2.log("Transfiriendo ownership del Treasury al Timelock...");
+        treasury.transferOwnership(address(timelock));
+        console2.log("  [OK] Treasury ownership transferido al Timelock");
+        console2.log("");
+
+        // Paso 10: Transfiere el ownership del Engine al Timelock
+        console2.log("Transfiriendo ownership del Engine al Timelock...");
+        engine.transferOwnership(address(timelock));
+        console2.log("  [OK] Engine ownership transferido exitosamente");
+        console2.log("");
+
+        // Paso 11: Finaliza el broadcast
         vm.stopBroadcast();
 
-        // Paso 9: Realiza validaciones post-despliegue
-        _validateDeployment(governanceToken, timelock, governor, engine);
+        // Paso 12: Realiza validaciones post-despliegue
+        _validateDeployment(governanceToken, timelock, governor, treasury, engine);
 
         console2.log("===========================================");
         console2.log("Despliegue de gobernanza completado!");
@@ -159,13 +200,18 @@ contract DeployDAO is Script {
         console2.log("  TSCGovernanceToken:", address(governanceToken));
         console2.log("  TSCTimelock:", address(timelock));
         console2.log("  TSCGovernor:", address(governor));
+        console2.log("  TSCGTreasury:", address(treasury));
         console2.log("");
         console2.log("Sistema de gobernanza completamente configurado!");
-        console2.log("  El Timelock es ahora el owner del Engine.");
+        console2.log("  El Timelock es ahora el owner del Engine y Treasury.");
         console2.log("  Cambios en parametros requieren propuesta + votacion + 2 dias delay");
         console2.log("");
+        console2.log("Distribucion de TSCG:");
+        console2.log("  Deployer:", (INITIAL_SUPPLY - TREASURY_TSCG_ALLOCATION) / 1e18, "TSCG");
+        console2.log("  Treasury:", TREASURY_TSCG_ALLOCATION / 1e18, "TSCG (disponible para compra)");
+        console2.log("");
 
-        return (governanceToken, timelock, governor);
+        return (governanceToken, timelock, governor, treasury);
     }
 
     //* Función interna de validación
@@ -175,12 +221,14 @@ contract DeployDAO is Script {
      * @param token Instancia del TSCGovernanceToken desplegado
      * @param timelock Instancia del TSCTimelock desplegado
      * @param governor Instancia del TSCGovernor desplegado
+     * @param treasury Instancia del TSCGTreasury desplegado
      * @param engine Instancia del TestStableCoinEngine existente
      */
     function _validateDeployment(
         TSCGovernanceToken token,
         TSCTimelock timelock,
         TSCGovernor governor,
+        TSCGTreasury treasury,
         TestStableCoinEngine engine
     ) private view {
         console2.log("Validando despliegue...");
@@ -189,6 +237,7 @@ contract DeployDAO is Script {
         require(address(token).code.length > 0, "GovernanceToken no tiene codigo");
         require(address(timelock).code.length > 0, "Timelock no tiene codigo");
         require(address(governor).code.length > 0, "Governor no tiene codigo");
+        require(address(treasury).code.length > 0, "Treasury no tiene codigo");
 
         // Valida supply del token de gobernanza
         require(token.totalSupply() == INITIAL_SUPPLY, "Supply incorrecto");
@@ -213,6 +262,12 @@ contract DeployDAO is Script {
         require(governor.votingPeriod() == VOTING_PERIOD, "Voting period incorrecto");
         require(governor.proposalThreshold() == PROPOSAL_THRESHOLD, "Proposal threshold incorrecto");
         console2.log("  [OK] Parametros del Governor correctos");
+
+        // Valida Treasury
+        require(treasury.getTSCGPrice() == INITIAL_TSCG_PRICE, "Precio TSCG incorrecto");
+        require(treasury.getTSCGBalance() == TREASURY_TSCG_ALLOCATION, "Balance TSCG en Treasury incorrecto");
+        require(treasury.owner() == address(timelock), "Timelock no es owner del Treasury");
+        console2.log("  [OK] Treasury configurado correctamente");
 
         console2.log("Validacion completada - Todo correcto!");
         console2.log("");
