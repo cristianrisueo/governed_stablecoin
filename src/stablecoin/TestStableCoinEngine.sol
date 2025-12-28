@@ -67,6 +67,11 @@ contract TestStableCoinEngine is ReentrancyGuard, Ownable {
      */
     error TestStableCoinEngine__InvalidGovernanceParameter();
 
+    /**
+     * @dev Error lanzado cuando la liquidación falla en mejorar el health factor
+     */
+    error TestStableCoinEngine__HealthFactorNotImproved();
+
     //* Tipos
 
     using OracleLib for AggregatorV3Interface;
@@ -100,6 +105,13 @@ contract TestStableCoinEngine is ReentrancyGuard, Ownable {
      * INMUTABLE: Base matemática, no debe cambiar
      */
     uint256 private constant LIQUIDATION_PRECISION = 100;
+
+    /**
+     * @dev Health factor objetivo a restaurar tras liquidación parcial
+     * 1.25e18 = 1.25 con precisión de 18 decimales
+     * Proporciona un buffer de seguridad por encima del mínimo (1.0)
+     */
+    uint256 private constant TARGET_HEALTH_FACTOR = 1.25e18;
 
     //* Parámetros Gobernables (pueden ser modificados por gobernanza)
 
@@ -297,44 +309,60 @@ contract TestStableCoinEngine is ReentrancyGuard, Ownable {
     }
 
     /**
-     * @notice Liquida completamente una posición insolvente
+     * @notice Liquida parcialmente una posición insolvente
      * @param user Dirección del usuario a liquidar
-     * @dev El liquidador recibe el colateral correspondiente a la deuda + 10% de bonus
-     * @dev SIEMPRE liquida el 100% de la deuda del usuario
+     * @dev El liquidador recibe el colateral correspondiente a la deuda cubierta + bonus (en WETH)
+     * @dev Liquida SOLO la cantidad necesaria para restaurar el health factor a TARGET_HEALTH_FACTOR
      * @dev Solo se puede liquidar si el health factor del usuario es < 1
      * @dev Si el colateral del usuario no alcanza para cubrir deuda + bonus, el liquidador asume la pérdida
      *
-     * Ejemplo:
-     * - Usuario tiene 10 WETH de colateral y $15,000 de deuda (HF = 0.66)
-     * - Colateral equivalente: $15,000 / $2,000 (precio ETH) = 7.5 WETH
-     * - Bonus: 7.5 × 10% = 0.75 WETH
-     * - Liquidador paga: $15,000 en TSC y recibe: 8.25 WETH
-     * - Usuario queda con: 1.75 WETH y 0 de deuda
+     * Ejemplo de liquidación parcial:
+     * - Usuario tiene 10 WETH de colateral ($20,000) y $16,000 de deuda (HF = 0.625)
+     * - Cálculo determina que liquidar $8,000 restaura HF a TARGET_HEALTH_FACTOR
+     * - Colateral para $8,000: 4 WETH
+     * - Bonus: 4 × 10% = 0.4 WETH
+     * - Liquidador paga: $8,000 en TSC y recibe: 4.4 WETH
+     * - Usuario queda con: 5.6 WETH, $8,000 de deuda y HF = TARGET_HEALTH_FACTOR
      */
     function liquidate(address user) external nonReentrant {
-        uint256 userHealthFactor = _healthFactor(user);
-        if (userHealthFactor >= MIN_HEALTH_FACTOR) {
+        // Comprueba el health factor inicial del usuario (>=1 revierte)
+        uint256 initialHealthFactor = _healthFactor(user);
+        if (initialHealthFactor >= MIN_HEALTH_FACTOR) {
             revert TestStableCoinEngine__HealthFactorOk();
         }
 
+        // Obtiene la deuda (TSC) y el valor del colateral (WETH) del usuario
         uint256 totalDebt = s_stablecoinMinted[user];
-        uint256 tokenAmountFromDebt = getTokenAmountFromUsd(totalDebt);
+        uint256 totalCollateralValue = getAccountCollateralValue(user);
+
+        // Calcula la deuda parcial a cubrir para alcanzar el HF objetivo
+        uint256 debtToCover = _calculateDebtToCover(totalDebt, totalCollateralValue);
+
+        // Convierte la deuda a cubir en colateral, calcula el bonus y el colateral total que se redime
+        uint256 tokenAmountFromDebt = getTokenAmountFromUsd(debtToCover);
         uint256 bonusCollateral = (tokenAmountFromDebt * s_liquidationBonus) / LIQUIDATION_PRECISION;
         uint256 totalCollateralToRedeem = tokenAmountFromDebt + bonusCollateral;
 
-        // Este check es súper importante para evitar bad debt. Si el colateral del usuario no alcanza
-        // para cubrir la deuda + bonus, el liquidador recibe todo el colateral disponible y asume la pérdida
+        // Si el colateral del usuario no alcanza para cubrir la deuda + bonus
+        // el liquidador recibe todo el colateral disponible y asume la pérdida
         uint256 userCollateral = s_collateralDeposited[user];
 
         if (totalCollateralToRedeem > userCollateral) {
             totalCollateralToRedeem = userCollateral;
-            emit BadDebtDetected(user, totalDebt, userCollateral);
+            emit BadDebtDetected(user, debtToCover, userCollateral);
         }
 
+        // Realiza la liquidación: Se queda con el colateral y quema la deuda
         _redeemCollateral(user, msg.sender, totalCollateralToRedeem);
-        _burnTsc(totalDebt, user, msg.sender);
+        _burnTsc(debtToCover, user, msg.sender);
 
-        // Lo vamos a dejar por paranóicos, pero un liquidador gana colateral y no toca su deuda, su HF siempre sube
+        // Comprueba que el health factor del usuario ha mejorado tras la liquidación
+        uint256 finalHealthFactor = _healthFactor(user);
+        if (finalHealthFactor <= initialHealthFactor) {
+            revert TestStableCoinEngine__HealthFactorNotImproved();
+        }
+
+        // Comprueba que el health factor del liquidador permanece saludable
         _revertIfHealthFactorIsBroken(msg.sender);
     }
 
@@ -421,6 +449,58 @@ contract TestStableCoinEngine is ReentrancyGuard, Ownable {
         uint256 collateralAdjustedForThreshold = (collateralValueInUsd * s_liquidationThreshold) / LIQUIDATION_PRECISION;
 
         return (collateralAdjustedForThreshold * PRECISION) / totalTscMinted;
+    }
+
+    /**
+     * @dev Calcula la cantidad de deuda a cubrir para restaurar el health factor del usuario al objetivo
+     * @param totalDebt Deuda total del usuario en USD (18 decimales)
+     * @param totalCollateralValue Valor total del colateral en USD (18 decimales)
+     * @return debtToCover Cantidad de deuda a cubrir en USD para alcanzar TARGET_HEALTH_FACTOR
+     *
+     * Derivación de la fórmula:
+     * Objetivo: (colateral_final × threshold) / deuda_final = target HF
+     *
+     * Casos especiales:
+     * - Retorna 0 si el cálculo da negativo (posición ya saludable)
+     * - Retorna totalDebt si la cantidad calculada excede la deuda total
+     */
+    function _calculateDebtToCover(uint256 totalDebt, uint256 totalCollateralValue) private view returns (uint256) {
+        // Calcula el multiplicador de threshold (50/100 = 0.5 con precisión)
+        uint256 thresholdMultiplier = (s_liquidationThreshold * PRECISION) / LIQUIDATION_PRECISION;
+
+        // Calcula el multiplicador de bonus (1 + bonus / 100) = (100 + 10)/100 = 1.1 con precisión
+        uint256 bonusMultiplier = ((LIQUIDATION_PRECISION + s_liquidationBonus) * PRECISION) / LIQUIDATION_PRECISION;
+
+        // Numerador: collateralValue × threshold - totalDebt × targetHF
+        uint256 numerator = (totalCollateralValue * thresholdMultiplier) / PRECISION;
+        uint256 debtComponent = (totalDebt * TARGET_HEALTH_FACTOR) / PRECISION;
+
+        // Si el numerador es negativo, no se necesita liquidación
+        if (numerator <= debtComponent) {
+            return 0;
+        }
+
+        numerator = numerator - debtComponent;
+
+        // Denominador: targetHF - threshold × (1 + bonus)
+        uint256 thresholdWithBonus = (thresholdMultiplier * bonusMultiplier) / PRECISION;
+
+        // Si el denominador es negativo o cero, algo está mal
+        if (TARGET_HEALTH_FACTOR <= thresholdWithBonus) {
+            return totalDebt; // Liquidar todo como fallback
+        }
+
+        uint256 denominator = TARGET_HEALTH_FACTOR - thresholdWithBonus;
+
+        // Calcular deuda a cubrir
+        uint256 debtToCover = (numerator * PRECISION) / denominator;
+
+        // Limitar a la deuda total
+        if (debtToCover > totalDebt) {
+            return totalDebt;
+        }
+
+        return debtToCover;
     }
 
     /**
