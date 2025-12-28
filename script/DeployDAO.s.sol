@@ -23,8 +23,8 @@ import {TestStableCoinEngine} from "../src/stablecoin/TestStableCoinEngine.sol";
  *
  * IMPORTANTE:
  * - Este script requiere la dirección del TestStableCoinEngine ya desplegado
- * - El deployer debe ser el owner actual del Engine para transferir ownership
- * - Después de ejecutar, el Timelock será el owner del Engine
+ * - El deployer debe ser el owner actual del Engine
+ * - Después de ejecutar, el Timelock será el owner del Engine (transferencia inmediata con Ownable)
  */
 contract DeployDAO is Script {
     //* Configuración de Gobernanza
@@ -142,7 +142,7 @@ contract DeployDAO is Script {
         // Paso 7: Transfiere el ownership del Engine al Timelock
         console2.log("Transfiriendo ownership del Engine al Timelock...");
         engine.transferOwnership(address(timelock));
-        console2.log("  [OK] Transferencia iniciada (Ownable2Step - pendiente de aceptacion)");
+        console2.log("  [OK] Ownership transferido exitosamente");
         console2.log("");
 
         // Paso 8: Finaliza el broadcast
@@ -160,10 +160,9 @@ contract DeployDAO is Script {
         console2.log("  TSCTimelock:", address(timelock));
         console2.log("  TSCGovernor:", address(governor));
         console2.log("");
-        console2.log("IMPORTANTE - Paso pendiente:");
-        console2.log("  El Timelock debe aceptar ownership del Engine.");
-        console2.log("  Esto requiere una propuesta de gobernanza que llame a:");
-        console2.log("  engine.acceptOwnership()");
+        console2.log("Sistema de gobernanza completamente configurado!");
+        console2.log("  El Timelock es ahora el owner del Engine.");
+        console2.log("  Cambios en parametros requieren propuesta + votacion + 2 dias delay");
         console2.log("");
 
         return (governanceToken, timelock, governor);
@@ -205,9 +204,9 @@ contract DeployDAO is Script {
         require(!timelock.hasRole(adminRole, msg.sender), "Deployer todavia tiene ADMIN_ROLE");
         console2.log("  [OK] ADMIN_ROLE revocado correctamente");
 
-        // Valida pending owner del Engine
-        require(engine.pendingOwner() == address(timelock), "Timelock no es pending owner del Engine");
-        console2.log("  [OK] Timelock es pending owner del Engine");
+        // Valida owner del Engine
+        require(engine.owner() == address(timelock), "Timelock no es owner del Engine");
+        console2.log("  [OK] Timelock es owner del Engine");
 
         // Valida parámetros del Governor
         require(governor.votingDelay() == VOTING_DELAY, "Voting delay incorrecto");

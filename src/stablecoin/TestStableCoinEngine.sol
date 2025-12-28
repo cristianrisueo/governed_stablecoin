@@ -4,7 +4,7 @@ pragma solidity ^0.8.20;
 import {AggregatorV3Interface} from "@chainlink/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {Ownable2Step, Ownable} from "@openzeppelin/contracts/access/Ownable2Step.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {TestStableCoin} from "./TestStableCoin.sol";
 import {OracleLib} from "./libraries/OracleLib.sol";
 
@@ -28,7 +28,7 @@ import {OracleLib} from "./libraries/OracleLib.sol";
  * - Parámetros críticos (liquidation threshold, bonus) son gobernables
  * - Depende completamente de la overcollateralización para mantener el peg
  */
-contract TestStableCoinEngine is ReentrancyGuard, Ownable2Step {
+contract TestStableCoinEngine is ReentrancyGuard, Ownable {
     //* Errores
 
     /**

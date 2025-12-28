@@ -246,8 +246,8 @@ forge script script/DeployDAO.s.sol --sig "run(address)" <ENGINE_ADDRESS> --rpc-
 
 ## Seguridad
 
-- **ReentrancyGuard**: Todas las funciones de mutación
-- **Ownable2Step**: Transferencia de ownership en 2 pasos
+- **ReentrancyGuard**: Todas las funciones de mutación protegidas contra reentrancy
+- **Ownable**: Engine controlado por Timelock (gobernanza descentralizada)
 - **OracleLib**: Revierte si precio > 3 horas de antigüedad
 - **Health Factor**: Siempre verificado antes de permitir operaciones
-- **TimeLock**: 2 días de delay para cambios críticos
+- **TimeLock**: 2 días de delay para cambios críticos en parámetros del protocolo
