@@ -17,15 +17,17 @@ import {OracleLib} from "./libraries/OracleLib.sol";
  * - Acuñación y quema de stablecoins (TSC)
  * - Liquidaciones de posiciones insolventes
  * - Cálculo de health factors
+ * - Fondo de seguro para cubrir el bad debt
  *
  * El sistema está diseñado para mantener 1 TSC = 1 USD mediante:
  * - Overcollateralización del 200% (soporta caídas de hasta ~25-33% antes de entrar en riesgo)
  * - Liquidaciones automáticas cuando health factor < 1
  * - Uso de Chainlink oracles para pricing en tiempo real
+ * - Insurance fund que cobra fees en el minting y cubre el bad debt en las liquidaciones
  *
  * IMPORTANTE: Este protocolo es algorítmico y descentralizado.
  * - Tiene gobernanza on-chain mediante TSCGovernor + TSCTimelock
- * - Parámetros críticos (liquidation threshold, bonus) son gobernables
+ * - Parámetros críticos (liquidation threshold, bonus, mint fee) son gobernables
  * - Depende completamente de la overcollateralización para mantener el peg
  */
 contract TestStableCoinEngine is ReentrancyGuard, Ownable {
@@ -68,17 +70,20 @@ contract TestStableCoinEngine is ReentrancyGuard, Ownable {
     error TestStableCoinEngine__InvalidGovernanceParameter();
 
     /**
-     * @dev Error lanzado cuando la liquidación falla en mejorar el health factor
+     * @dev Error lanzado cuando la liquidación falla en alcanzar el target health factor
      */
-    error TestStableCoinEngine__HealthFactorNotImproved();
+    error TestStableCoinEngine__HealthFactorStillBroken();
+
+    /**
+     * @dev Error lanzado cuando el fondo de seguro no tiene suficientes fondos para cubrir bad debt
+     */
+    error TestStableCoinEngine__InsufficientInsuranceFunds();
 
     //* Tipos
 
     using OracleLib for AggregatorV3Interface;
 
-    //* Variables de Estado
-
-    //* Constantes Inmutables (no gobernables por seguridad)
+    //* Constantes (no gobernables por seguridad)
 
     /**
      * @dev Factor de salud mínimo permitido (con 18 decimales)
@@ -105,6 +110,30 @@ contract TestStableCoinEngine is ReentrancyGuard, Ownable {
      * INMUTABLE: Base matemática, no debe cambiar
      */
     uint256 private constant LIQUIDATION_PRECISION = 100;
+
+    /**
+     * @dev Precisión para el cálculo de fees en basis points
+     * 10000 basis points = 100%
+     * INMUTABLE: Base matemática, no debe cambiar
+     */
+    uint256 private constant BASIS_POINTS = 10000;
+
+    //* Variables Inmutables (referencias a otros contratos)
+
+    /**
+     * @dev Referencia al token WETH (ERC20)
+     */
+    IERC20 private immutable i_weth;
+
+    /**
+     * @dev Referencia al contrato TestStableCoin
+     */
+    TestStableCoin private immutable i_tsc;
+
+    /**
+     * @dev Referencia al price feed de Chainlink para WETH/USD
+     */
+    AggregatorV3Interface private immutable i_priceFeed;
 
     //* Parámetros Gobernables (pueden ser modificados por gobernanza)
 
@@ -141,6 +170,27 @@ contract TestStableCoinEngine is ReentrancyGuard, Ownable {
     uint256 private s_targetHealthFactor = 1.25e18;
 
     /**
+     * @dev Mint fee en basis points (20 = 0.2%)
+     * Fee cobrada en cada operación de mint de TSC para financiar el fondo de seguro
+     *
+     * GOBERNABLE: La gobernanza puede ajustar entre 5-50 basis points
+     * - Más bajo (5 bps = 0.05%) = menos seguro, más atractivo para usuarios
+     * - Más alto (50 bps = 0.5%) = más seguro, menos atractivo para usuarios
+     */
+    uint256 private s_mintFee = 20;
+
+    //* Variables de estado no gobernables
+
+    /**
+     * @dev Balance del fondo de seguro en USD (18 decimales)
+     * Acumula las fees de mint para cubrir bad debt durante liquidaciones
+     * Cuando ocurre bad debt, este fondo asegura que los liquidadores reciban su bonus completo
+     *
+     * NO GOBERNABLE: Es un acumulador que crece con las fees, no un parámetro ajustable
+     */
+    uint256 private s_insuranceFund;
+
+    /**
      * @dev Mapeo de usuario a cantidad de WETH depositado como colateral
      */
     mapping(address user => uint256 amountWethDeposited) private s_collateralDeposited;
@@ -149,21 +199,6 @@ contract TestStableCoinEngine is ReentrancyGuard, Ownable {
      * @dev Mapeo de usuario a cantidad de TSC acuñado
      */
     mapping(address user => uint256 amountTscMinted) private s_stablecoinMinted;
-
-    /**
-     * @dev Referencia al token WETH (ERC20)
-     */
-    IERC20 private immutable i_weth;
-
-    /**
-     * @dev Referencia al contrato TestStableCoin
-     */
-    TestStableCoin private immutable i_tsc;
-
-    /**
-     * @dev Referencia al price feed de Chainlink para WETH/USD
-     */
-    AggregatorV3Interface private immutable i_priceFeed;
 
     //* Eventos
 
@@ -183,12 +218,12 @@ contract TestStableCoinEngine is ReentrancyGuard, Ownable {
     event CollateralRedeemed(address indexed redeemedFrom, address indexed redeemedTo, uint256 amountCollateral);
 
     /**
-     * @dev Emitido cuando se detecta bad debt durante una liquidación
+     * @dev Emitido cuando se liquida una posición con bad debt usando el fondo de seguridad
      * @param user Dirección del usuario liquidado que tenía bad debt
-     * @param totalDebt Cantidad total de deuda en TSC que debía ser cubierta
-     * @param collateralAvailable Cantidad de colateral WETH disponible (menor que deuda + bonus)
+     * @param totalDebt Cantidad total de deuda en TSC que fue liquidada (100% de la deuda)
+     * @param insuranceUsed Cantidad en TSC del fondo de seguridad usada para cubrir el shortfall
      */
-    event BadDebtDetected(address indexed user, uint256 totalDebt, uint256 collateralAvailable);
+    event BadDebtTotalLiquidation(address indexed user, uint256 totalDebt, uint256 insuranceUsed);
 
     /**
      * @dev Emitido cuando la gobernanza actualiza el umbral de liquidación
@@ -210,6 +245,13 @@ contract TestStableCoinEngine is ReentrancyGuard, Ownable {
      * @param newTarget Nuevo valor del target health factor
      */
     event TargetHealthFactorUpdated(uint256 oldTarget, uint256 newTarget);
+
+    /**
+     * @dev Emitido cuando la gobernanza actualiza la mint fee
+     * @param oldFee Valor anterior de la fee (en basis points)
+     * @param newFee Nuevo valor de la fee (en basis points)
+     */
+    event MintFeeUpdated(uint256 oldFee, uint256 newFee);
 
     //* Modifiers
 
@@ -276,14 +318,28 @@ contract TestStableCoinEngine is ReentrancyGuard, Ownable {
 
     /**
      * @notice Acuña TestStableCoins contra el colateral depositado
-     * @param amountTscToMint Cantidad de TSC a acuñar
+     * @param amountTscToMint Cantidad BRUTA de TSC que el usuario solicita (antes de fees)
+     * @dev Cobra un fee de minting que va al fondo de seguridad contra bad debt
+     * @dev El usuario recibe: amountTscToMint - fee
+     * @dev La deuda registrada es el monto NETO (lo que realmente recibe el usuario)
      * @dev Revierte si el health factor resultante es menor a MIN_HEALTH_FACTOR
      */
     function mintTsc(uint256 amountTscToMint) public moreThanZero(amountTscToMint) nonReentrant {
-        s_stablecoinMinted[msg.sender] += amountTscToMint;
+        // Calcula la fee y el monto neto a mintear
+        uint256 fee = (amountTscToMint * s_mintFee) / BASIS_POINTS;
+        uint256 netAmount = amountTscToMint - fee;
+
+        // Registra solo el monto NETO como deuda del usuario
+        s_stablecoinMinted[msg.sender] += netAmount;
+
+        // Añade la fee al fondo de seguridad (valor en USD con 18 decimales)
+        s_insuranceFund += fee;
+
+        // Verifica que el health factor permanece saludable
         _revertIfHealthFactorIsBroken(msg.sender);
 
-        bool minted = i_tsc.mint(msg.sender, amountTscToMint);
+        // Mintea solo el monto NETO al usuario (la fee no se mintea, solo se contabiliza)
+        bool minted = i_tsc.mint(msg.sender, netAmount);
         if (!minted) {
             revert TestStableCoinEngine__MintFailed();
         }
@@ -320,62 +376,59 @@ contract TestStableCoinEngine is ReentrancyGuard, Ownable {
     }
 
     /**
-     * @notice Liquida parcialmente una posición insolvente
+     * @notice Liquida parcialmente una posición insolvente o totalmente en caso de bad debt
      * @param user Dirección del usuario a liquidar
      * @dev El liquidador recibe el colateral correspondiente a la deuda cubierta + bonus (en WETH)
-     * @dev Liquida SOLO la cantidad necesaria para restaurar el health factor a TARGET_HEALTH_FACTOR
+     * @dev Liquida SOLO la cantidad necesaria para restaurar el health factor a s_targetHealthFactor
      * @dev Solo se puede liquidar si el health factor del usuario es < 1
-     * @dev Si el colateral del usuario no alcanza para cubrir deuda + bonus, el liquidador asume la pérdida
+     * @dev Si el colateral del usuario no alcanza para cubrir deuda + bonus, se usa el fondo de seguridad
      *
      * Ejemplo de liquidación parcial:
      * - Usuario tiene 10 WETH de colateral ($20,000) y $16,000 de deuda (HF = 0.625)
-     * - Cálculo determina que liquidar $8,000 restaura HF a TARGET_HEALTH_FACTOR
+     * - Cálculo determina que liquidar $8,000 restaura HF a s_targetHealthFactor
      * - Colateral para $8,000: 4 WETH
      * - Bonus: 4 × 10% = 0.4 WETH
      * - Liquidador paga: $8,000 en TSC y recibe: 4.4 WETH
-     * - Usuario queda con: 5.6 WETH, $8,000 de deuda y HF = TARGET_HEALTH_FACTOR
+     * - Usuario queda con: 5.6 WETH, $8,000 de deuda y HF = s_targetHealthFactor
      */
     function liquidate(address user) external nonReentrant {
-        // Comprueba el health factor inicial del usuario (>=1 revierte)
+        // Comprueba que el usuario es liquidable (health factor < 1)
         uint256 initialHealthFactor = _healthFactor(user);
+
         if (initialHealthFactor >= MIN_HEALTH_FACTOR) {
             revert TestStableCoinEngine__HealthFactorOk();
         }
 
-        // Obtiene la deuda (TSC) y el valor del colateral (WETH) del usuario
+        // Obtiene la deuda en TSC y el valor del colateral en USD
         uint256 totalDebt = s_stablecoinMinted[user];
         uint256 totalCollateralValue = getAccountCollateralValue(user);
 
-        // Calcula la deuda parcial a cubrir para alcanzar el HF objetivo
+        // Calcula la deuda a cubrir para alcanzar el target HF
         uint256 debtToCover = _calculateDebtToCover(totalDebt, totalCollateralValue);
 
-        // Convierte la deuda a cubir en colateral
+        // Calcula la deuda del usuario en WETH y el colateral el colateral total a redimir (deuda + bonus)
         uint256 tokenAmountFromDebt = getTokenAmountFromUsd(debtToCover);
-
-        // Calcula el bonus para el liquidador y la cantidad total de colateral a rescatar
         uint256 bonusCollateral = (tokenAmountFromDebt * s_liquidationBonus) / LIQUIDATION_PRECISION;
         uint256 totalCollateralToRedeem = tokenAmountFromDebt + bonusCollateral;
 
-        // Si el colateral del usuario no alcanza para cubrir la deuda + bonus
-        // el liquidador recibe todo el colateral disponible y asume la pérdida
+        // Obtiene el colateral total del usuario
         uint256 userCollateral = s_collateralDeposited[user];
 
+        // Si el usuario no tiene suficiente colateral, es bad debt (liquidación total con insurance fund)
         if (totalCollateralToRedeem > userCollateral) {
-            totalCollateralToRedeem = userCollateral;
-            emit BadDebtDetected(user, debtToCover, userCollateral);
+            _liquidateTotalWithInsurance(user, totalDebt, userCollateral);
+        } else {
+            _liquidatePartial(user, debtToCover, totalCollateralToRedeem);
         }
 
-        // Realiza la liquidación: Se queda con el colateral y quema la deuda
-        _redeemCollateral(user, msg.sender, totalCollateralToRedeem);
-        _burnTsc(debtToCover, user, msg.sender);
-
-        // Comprueba que el health factor del usuario ha mejorado tras la liquidación
+        // Comprueba que el health factor del usuario liquidado ha llegado al target
         uint256 finalHealthFactor = _healthFactor(user);
-        if (finalHealthFactor <= initialHealthFactor) {
-            revert TestStableCoinEngine__HealthFactorNotImproved();
+
+        if (finalHealthFactor <= s_targetHealthFactor) {
+            revert TestStableCoinEngine__HealthFactorStillBroken();
         }
 
-        // Comprueba que el health factor del liquidador permanece saludable
+        // Comprueba que el health factor del liquidador no se ha roto (<1)
         _revertIfHealthFactorIsBroken(msg.sender);
     }
 
@@ -411,6 +464,64 @@ contract TestStableCoinEngine is ReentrancyGuard, Ownable {
         bool success = i_weth.transfer(to, amountCollateral);
         if (!success) {
             revert TestStableCoinEngine__TransferFailed();
+        }
+    }
+
+    /**
+     * @dev Ejecuta liquidación parcial (colateral del usuario suficiente para cubrir deuda + bonus)
+     * @param user Usuario a liquidar
+     * @param debtToCover Cantidad de deuda a cubrir
+     * @param collateralToRedeem Cantidad de colateral a transferir al liquidador (deuda + bonus)
+     */
+    function _liquidatePartial(address user, uint256 debtToCover, uint256 collateralToRedeem) private {
+        // El liquidador paga la deuda total del usuario
+        _burnTsc(debtToCover, user, msg.sender);
+
+        // El liquidador recibe el colateral correspondiente (deuda + bonus)
+        _redeemCollateral(user, msg.sender, collateralToRedeem);
+    }
+
+    /**
+     * @dev Ejecuta liquidación total usando insurance fund para cubrir lo que falte del bad debt
+     * @param user Usuario a liquidar
+     * @param totalDebt Deuda total del usuario (100%)
+     * @param userCollateral Colateral total disponible del usuario
+     */
+    function _liquidateTotalWithInsurance(address user, uint256 totalDebt, uint256 userCollateral) private {
+        // Calcula la cantidad de deuda en colateral
+        uint256 tokenAmountFromDebt = getTokenAmountFromUsd(totalDebt);
+
+        // Calcula el colateral total necesario (deuda + bonus)
+        uint256 bonusCollateral = (tokenAmountFromDebt * s_liquidationBonus) / LIQUIDATION_PRECISION;
+        uint256 totalCollateralNeeded = tokenAmountFromDebt + bonusCollateral;
+
+        // Calcula el colateral necesario y el que tiene el usuario en USD (o TSC)
+        uint256 collateralValueNeeded = getUsdValue(totalCollateralNeeded);
+        uint256 collateralValueAvailable = getUsdValue(userCollateral);
+
+        // Calcula el shortfall (diferencia entre necesario y disponible)
+        uint256 shortfall = collateralValueNeeded - collateralValueAvailable;
+
+        // Comprueba que el insurance fund tiene fondos suficientes (más nos vale)
+        if (s_insuranceFund < shortfall) {
+            revert TestStableCoinEngine__InsufficientInsuranceFunds();
+        }
+
+        // Actualiza el state del insurance fund para quitar el shortfall y emite evento
+        s_insuranceFund -= shortfall;
+
+        emit BadDebtTotalLiquidation(user, totalDebt, shortfall);
+
+        // El liquidador paga la deuda total del usuario
+        _burnTsc(totalDebt, user, msg.sender);
+
+        // El liquidador recibe todo el colateral del usuario
+        _redeemCollateral(user, msg.sender, userCollateral);
+
+        // El fondo de seguridad compensa el shortfall (en TSC) al liquidador
+        bool minted = i_tsc.mint(msg.sender, shortfall);
+        if (!minted) {
+            revert TestStableCoinEngine__MintFailed();
         }
     }
 
@@ -605,6 +716,31 @@ contract TestStableCoinEngine is ReentrancyGuard, Ownable {
         emit TargetHealthFactorUpdated(oldTarget, newTarget);
     }
 
+    /**
+     * @notice Actualiza la mint fee (solo owner/gobernanza)
+     * @param newFee Nueva fee en basis points (5-50 recomendado)
+     * @dev Solo puede ser llamado por el owner (Timelock via gobernanza)
+     *
+     * VALIDACIONES:
+     * - Debe estar entre 5 y 50 basis points (0.05% - 0.5%)
+     * - Muy bajo (<5 bps) = fondo de seguro crece lentamente
+     * - Muy alto (>50 bps) = desincentiva el uso del protocolo
+     *
+     * EJEMPLO:
+     * - newFee = 10 → 0.1% fee por mint
+     * - newFee = 30 → 0.3% fee por mint (más seguridad)
+     */
+    function updateMintFee(uint256 newFee) external onlyOwner {
+        if (newFee < 5 || newFee > 50) {
+            revert TestStableCoinEngine__InvalidGovernanceParameter();
+        }
+
+        uint256 oldFee = s_mintFee;
+        s_mintFee = newFee;
+
+        emit MintFeeUpdated(oldFee, newFee);
+    }
+
     //* Helpers y getters
 
     /**
@@ -760,5 +896,21 @@ contract TestStableCoinEngine is ReentrancyGuard, Ownable {
      */
     function getPriceFeed() external view returns (address) {
         return address(i_priceFeed);
+    }
+
+    /**
+     * @notice Obtiene el balance actual del fondo de seguro
+     * @return Balance en USD (con 18 decimales)
+     */
+    function getInsuranceFundBalance() external view returns (uint256) {
+        return s_insuranceFund;
+    }
+
+    /**
+     * @notice Obtiene la mint fee actual
+     * @return La fee en basis points (20 = 0.2%)
+     */
+    function getMintFee() external view returns (uint256) {
+        return s_mintFee;
     }
 }
