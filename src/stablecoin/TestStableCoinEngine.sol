@@ -79,6 +79,18 @@ contract TestStableCoinEngine is ReentrancyGuard, Ownable {
      */
     error TestStableCoinEngine__InsufficientInsuranceFunds();
 
+    /**
+     * @dev Error lanzado cuando el cambio propuesto excede el máximo permitido
+     * Previene cambios drásticos en parámetros gobernables
+     */
+    error TestStableCoinEngine__ChangeExceedsMaximum();
+
+    /**
+     * @dev Error lanzado cuando no ha pasado suficiente tiempo desde el último cambio
+     * Enforza MIN_CHANGE_COOLDOWN entre actualizaciones del mismo parámetro
+     */
+    error TestStableCoinEngine__CooldownNotElapsed();
+
     //* Tipos
 
     using OracleLib for AggregatorV3Interface;
@@ -117,6 +129,41 @@ contract TestStableCoinEngine is ReentrancyGuard, Ownable {
      * INMUTABLE: Base matemática, no debe cambiar
      */
     uint256 private constant BASIS_POINTS = 10000;
+
+    /**
+     * @dev Cambio máximo permitido en liquidationThreshold por propuesta (puntos)
+     * Ejemplo: Si threshold = 50, solo puede cambiar a 45-55
+     * INMUTABLE: Protección contra ataques de governance. Se puede cambiar, pero no mucho de una vez
+     */
+    uint256 private constant MAX_THRESHOLD_CHANGE = 5;
+
+    /**
+     * @dev Cambio máximo permitido en liquidationBonus por propuesta (puntos)
+     * Ejemplo: Si bonus = 10, solo puede cambiar a 8-12
+     * INMUTABLE: Protección contra ataques de governance. Se puede cambiar, pero no mucho de una vez
+     */
+    uint256 private constant MAX_BONUS_CHANGE = 2;
+
+    /**
+     * @dev Cambio máximo permitido en targetHealthFactor por propuesta (con 18 decimales)
+     * 0.1e18 = 0.1, permite cambios de ±0.1 (ej: 1.25 → 1.15 o 1.35)
+     * INMUTABLE: Protección contra ataques de governance. Se puede cambiar, pero no mucho de una vez
+     */
+    uint256 private constant MAX_TARGET_HF_CHANGE = 0.1e18;
+
+    /**
+     * @dev Cambio máximo permitido en mintFee por propuesta (basis points)
+     * Ejemplo: Si fee = 20 bps, solo puede cambiar a 15-25 bps
+     * INMUTABLE: Protección contra ataques de governance. Se puede cambiar, pero no mucho de una vez
+     */
+    uint256 private constant MAX_MINT_FEE_CHANGE = 5;
+
+    /**
+     * @dev Tiempo mínimo entre cambios del mismo parámetro (15 días)
+     * Previene cambios rápidos consecutivos que puedan desestabilizar el protocolo
+     * INMUTABLE: Protección contra ataques de governance
+     */
+    uint256 private constant MIN_CHANGE_COOLDOWN = 15 days;
 
     //* Variables Inmutables (referencias a otros contratos)
 
@@ -180,6 +227,30 @@ contract TestStableCoinEngine is ReentrancyGuard, Ownable {
     uint256 private s_mintFee = 20;
 
     //* Variables de estado no gobernables
+
+    /**
+     * @dev Timestamp del último cambio de liquidationThreshold
+     * Usado para enforcar MIN_CHANGE_COOLDOWN entre actualizaciones
+     */
+    uint256 private s_lastThresholdUpdate;
+
+    /**
+     * @dev Timestamp del último cambio de liquidationBonus
+     * Usado para enforcar MIN_CHANGE_COOLDOWN entre actualizaciones
+     */
+    uint256 private s_lastBonusUpdate;
+
+    /**
+     * @dev Timestamp del último cambio de targetHealthFactor
+     * Usado para enforcar MIN_CHANGE_COOLDOWN entre actualizaciones
+     */
+    uint256 private s_lastTargetHFUpdate;
+
+    /**
+     * @dev Timestamp del último cambio de mintFee
+     * Usado para enforcar MIN_CHANGE_COOLDOWN entre actualizaciones
+     */
+    uint256 private s_lastMintFeeUpdate;
 
     /**
      * @dev Balance del fondo de seguro en USD (18 decimales)
@@ -279,13 +350,21 @@ contract TestStableCoinEngine is ReentrancyGuard, Ownable {
     constructor(address wethAddress, address tscAddress, address priceFeedAddress, address initialOwner)
         Ownable(initialOwner)
     {
+        // Validar direcciones de contratos no nulas
         if (wethAddress == address(0) || tscAddress == address(0) || priceFeedAddress == address(0)) {
             revert TestStableCoinEngine__InvalidAddress();
         }
 
+        // Inicializa referencias a contratos externos
         i_weth = IERC20(wethAddress);
         i_tsc = TestStableCoin(tscAddress);
         i_priceFeed = AggregatorV3Interface(priceFeedAddress);
+
+        // Inicializar timestamps para permitir cambios de gobernanza inmediatos
+        s_lastThresholdUpdate = block.timestamp - MIN_CHANGE_COOLDOWN;
+        s_lastBonusUpdate = block.timestamp - MIN_CHANGE_COOLDOWN;
+        s_lastTargetHFUpdate = block.timestamp - MIN_CHANGE_COOLDOWN;
+        s_lastMintFeeUpdate = block.timestamp - MIN_CHANGE_COOLDOWN;
     }
 
     //* Lógica de negocio. Funciones externas y públicas
@@ -650,19 +729,43 @@ contract TestStableCoinEngine is ReentrancyGuard, Ownable {
      * - Debe estar entre 20 y 80 (125%-500% collateralization ratio)
      * - Muy bajo (<20) = riesgo de insolvencia sistémica
      * - Muy alto (>80) = protocolo poco capital efficient
+     * - Cambio máximo: ±5 puntos por propuesta (rate limiting)
+     * - Cooldown mínimo: 15 días entre cambios (rate limiting)
      *
      * EJEMPLO:
      * - newThreshold = 40 → 250% collateralization ratio (más seguro)
      * - newThreshold = 60 → 167% collateralization ratio (más arriesgado)
      */
     function updateLiquidationThreshold(uint256 newThreshold) external onlyOwner {
+        // Comprobación de rango válido
         if (newThreshold < 20 || newThreshold > 80) {
             revert TestStableCoinEngine__InvalidGovernanceParameter();
         }
 
+        // Obtiene el umbral actual y calcula el cambio (ternarios en solidity? WTF 🤯)
+        uint256 currentThreshold = s_liquidationThreshold;
+
+        // Si newThreshold > currentThreshold, change = new - current
+        // Si newThreshold <= currentThreshold, change = current - new
+        uint256 change =
+            newThreshold > currentThreshold ? newThreshold - currentThreshold : currentThreshold - newThreshold;
+
+        // Comprueba que el cambio no excede el máximo permitido de una sola vez
+        if (change > MAX_THRESHOLD_CHANGE) {
+            revert TestStableCoinEngine__ChangeExceedsMaximum();
+        }
+
+        // Comprueba que el tiempo de cooldown ha pasado desde el último cambio
+        if (block.timestamp < s_lastThresholdUpdate + MIN_CHANGE_COOLDOWN) {
+            revert TestStableCoinEngine__CooldownNotElapsed();
+        }
+
+        // Actualiza el estado con el nuevo umbral de liquidación y el timestamp del cambio
         uint256 oldThreshold = s_liquidationThreshold;
         s_liquidationThreshold = newThreshold;
+        s_lastThresholdUpdate = block.timestamp;
 
+        // Emite evento de actualización del umbral de liquidación
         emit LiquidationThresholdUpdated(oldThreshold, newThreshold);
     }
 
@@ -675,19 +778,42 @@ contract TestStableCoinEngine is ReentrancyGuard, Ownable {
      * - Debe estar entre 5 y 20 (5%-20% bonus)
      * - Muy bajo (<5) = poco incentivo para liquidadores → liquidaciones lentas
      * - Muy alto (>20) = muy costoso para usuarios liquidados
+     * - Cambio máximo: ±2 puntos por propuesta (rate limiting)
+     * - Cooldown mínimo: 15 días entre cambios (rate limiting)
      *
      * EJEMPLO:
      * - newBonus = 5 → liquidador recibe 5% extra
      * - newBonus = 15 → liquidador recibe 15% extra (más incentivo)
      */
     function updateLiquidationBonus(uint256 newBonus) external onlyOwner {
+        // Comprobación de rango válido
         if (newBonus < 5 || newBonus > 20) {
             revert TestStableCoinEngine__InvalidGovernanceParameter();
         }
 
+        // Obtiene el bonus actual y calcula el cambio (ternarios en solidity? WTF 🤯)
+        uint256 currentBonus = s_liquidationBonus;
+
+        // Si newBonus > currentBonus, change = new - current
+        // Si newBonus <= currentBonus, change = current - new
+        uint256 change = newBonus > currentBonus ? newBonus - currentBonus : currentBonus - newBonus;
+
+        // Comprueba que el cambio no excede el máximo permitido de una sola vez
+        if (change > MAX_BONUS_CHANGE) {
+            revert TestStableCoinEngine__ChangeExceedsMaximum();
+        }
+
+        // Comprueba que el tiempo de cooldown ha pasado desde el último cambio
+        if (block.timestamp < s_lastBonusUpdate + MIN_CHANGE_COOLDOWN) {
+            revert TestStableCoinEngine__CooldownNotElapsed();
+        }
+
+        // Actualiza el estado con el nuevo bonus de liquidación y el timestamp del cambio
         uint256 oldBonus = s_liquidationBonus;
         s_liquidationBonus = newBonus;
+        s_lastBonusUpdate = block.timestamp;
 
+        // Emite evento de actualización del bonus de liquidación
         emit LiquidationBonusUpdated(oldBonus, newBonus);
     }
 
@@ -700,19 +826,42 @@ contract TestStableCoinEngine is ReentrancyGuard, Ownable {
      * - Debe estar entre 1.1e18 y 1.5e18 (1.1 - 1.5 con 18 decimales)
      * - Muy bajo (<1.1) = poco margen de seguridad
      * - Muy alto (>1.5) = mayor impacto en usuarios
+     * - Cambio máximo: ±0.1e18 por propuesta (rate limiting)
+     * - Cooldown mínimo: 15 días entre cambios (rate limiting)
      *
      * EJEMPLO:
      * - newTarget = 1.1e18 → restaura HF a 1.1 (más conservador, menor impacto)
      * - newTarget = 1.5e18 → restaura HF a 1.5 (más agresivo, mayor seguridad)
      */
     function updateTargetHealthFactor(uint256 newTarget) external onlyOwner {
+        // Comprobación de rango válido
         if (newTarget < 1.1e18 || newTarget > 1.5e18) {
             revert TestStableCoinEngine__InvalidGovernanceParameter();
         }
 
+        // Obtiene el target HF actual y calcula el cambio (ternarios en solidity? WTF 🤯)
+        uint256 currentTarget = s_targetHealthFactor;
+
+        // Si newTarget > currentTarget, change = new - current
+        // Si newTarget <= currentTarget, change = current - new
+        uint256 change = newTarget > currentTarget ? newTarget - currentTarget : currentTarget - newTarget;
+
+        // Comprueba que el cambio no excede el máximo permitido de una sola vez
+        if (change > MAX_TARGET_HF_CHANGE) {
+            revert TestStableCoinEngine__ChangeExceedsMaximum();
+        }
+
+        // Comprueba que el tiempo de cooldown ha pasado desde el último cambio
+        if (block.timestamp < s_lastTargetHFUpdate + MIN_CHANGE_COOLDOWN) {
+            revert TestStableCoinEngine__CooldownNotElapsed();
+        }
+
+        // Actualiza el estado con el nuevo target health factor y el timestamp del cambio
         uint256 oldTarget = s_targetHealthFactor;
         s_targetHealthFactor = newTarget;
+        s_lastTargetHFUpdate = block.timestamp;
 
+        // Emite evento de actualización del target health factor
         emit TargetHealthFactorUpdated(oldTarget, newTarget);
     }
 
@@ -725,19 +874,42 @@ contract TestStableCoinEngine is ReentrancyGuard, Ownable {
      * - Debe estar entre 5 y 50 basis points (0.05% - 0.5%)
      * - Muy bajo (<5 bps) = fondo de seguro crece lentamente
      * - Muy alto (>50 bps) = desincentiva el uso del protocolo
+     * - Cambio máximo: ±5 basis points por propuesta (rate limiting)
+     * - Cooldown mínimo: 15 días entre cambios (rate limiting)
      *
      * EJEMPLO:
      * - newFee = 10 → 0.1% fee por mint
      * - newFee = 30 → 0.3% fee por mint (más seguridad)
      */
     function updateMintFee(uint256 newFee) external onlyOwner {
+        // Comprobación de rango válido
         if (newFee < 5 || newFee > 50) {
             revert TestStableCoinEngine__InvalidGovernanceParameter();
         }
 
+        // Obtiene la fee actual y calcula el cambio (ternarios en solidity? WTF 🤯)
+        uint256 currentFee = s_mintFee;
+
+        // Si newFee > currentFee, change = new - current
+        // Si newFee <= currentFee, change = current - new
+        uint256 change = newFee > currentFee ? newFee - currentFee : currentFee - newFee;
+
+        // Comprueba que el cambio no excede el máximo permitido de una sola vez
+        if (change > MAX_MINT_FEE_CHANGE) {
+            revert TestStableCoinEngine__ChangeExceedsMaximum();
+        }
+
+        // Comprueba que el tiempo de cooldown ha pasado desde el último cambio
+        if (block.timestamp < s_lastMintFeeUpdate + MIN_CHANGE_COOLDOWN) {
+            revert TestStableCoinEngine__CooldownNotElapsed();
+        }
+
+        // Actualiza el estado con la nueva mint fee y el timestamp del cambio
         uint256 oldFee = s_mintFee;
         s_mintFee = newFee;
+        s_lastMintFeeUpdate = block.timestamp;
 
+        // Emite evento de actualización de la mint fee
         emit MintFeeUpdated(oldFee, newFee);
     }
 
