@@ -119,7 +119,7 @@ HF = ($1,500 × 0.5) / $800 = $750 / $800 = 0.93 ✗ LIQUIDABLE
 
 ## Flujo de Liquidación (Parcial)
 
-El sistema implementa **liquidaciones parciales** que calculan exactamente cuánta deuda cubrir para restaurar el Health Factor al **Target Health Factor** (1.25 por defecto).
+El sistema implementa **liquidaciones parciales** que calculan exactamente cuánta deuda cubrir para restaurar el Health Factor al **Target Health Factor** (0.90 por defecto).
 
 ```
 Cuando Health Factor < 1.0, cualquiera puede liquidar:
@@ -129,7 +129,7 @@ liquidate(userAddress)
 ├─▶ Verificar HF < 1.0 (si no, revert)
 │
 ├─▶ Calcular deuda a cubrir (_calculateDebtToCover)
-│   └─ Calcula la cantidad exacta para restaurar HF al target (1.25)
+│   └─ Calcula la cantidad exacta para restaurar HF al target (0.90)
 │   └─ No liquida más de lo necesario
 │
 ├─▶ CASO A: Liquidación Parcial (colateral suficiente)
@@ -148,12 +148,12 @@ liquidate(userAddress)
 
 **Ejemplo Liquidación Parcial:**
 - Usuario: 10 WETH ($20,000), deuda $16,000 TSC, HF = 0.625
-- Sistema calcula: liquidar $8,000 para restaurar HF a 1.25
-- Liquidador paga: 8,000 TSC
-- Liquidador recibe: 4 WETH + 0.4 WETH bonus = 4.4 WETH (~$8,800)
-- Usuario tras liquidación: 5.6 WETH, $8,000 deuda, HF = 1.25
+- Sistema calcula: liquidar ~$10,900 para restaurar HF a 0.90
+- Liquidador paga: ~10,900 TSC
+- Liquidador recibe: ~5.45 WETH + 0.545 WETH bonus = ~5.995 WETH (~$11,990)
+- Usuario tras liquidación: ~4.005 WETH, ~$5,100 deuda, HF = 0.90
 
-**Protección Anti-Zombie:** Tras cada liquidación se verifica que el HF final >= Target HF (1.25), evitando posiciones que serían inmediatamente re-liquidables.
+**IMPORTANTE:** Usuario queda con HF = 0.90 (aún liquidable). Debe depositar más colateral o pagar deuda rápidamente. Si no actúa, será liquidado de nuevo.
 
 ---
 
@@ -192,7 +192,7 @@ liquidate(userAddress)
 |-----------|-------------|-------|---------------------|-------------|
 | Liquidation Threshold | 50 | 20-80 | ±5 | % de colateral válido como respaldo |
 | Liquidation Bonus | 10 | 5-20 | ±2 | % incentivo para liquidadores |
-| Target Health Factor | 1.25 | 1.1-1.5 | ±0.1 | HF objetivo tras liquidación |
+| Target Health Factor | 0.90 | 0.75-1.0 | ±0.05 | HF objetivo tras liquidación parcial |
 | Mint Fee | 20 bp | 0-100 bp | ±5 bp | Fee que alimenta Insurance Fund |
 
 ### Rate Limiting (Protección Anti-Ataques)
@@ -354,7 +354,7 @@ forge script script/DeployDAO.s.sol --sig "run(address)" <ENGINE_ADDRESS> --rpc-
 | **Ownable** | Engine controlado por Timelock (gobernanza descentralizada) |
 | **OracleLib** | Revierte si precio > 3 horas de antigüedad |
 | **Health Factor** | Siempre verificado antes de permitir operaciones |
-| **Target Health Factor** | Liquidaciones restauran HF a 1.25 (evita posiciones zombie) |
+| **Target Health Factor** | Liquidaciones parciales restauran HF a 0.90 (usuario debe actuar rápido) |
 | **TimeLock** | 2 días de delay para cambios críticos en parámetros |
 | **Rate Limiting** | 15 días cooldown + límites máximos por propuesta |
 | **Insurance Fund** | Cobertura de bad debt para proteger liquidadores |

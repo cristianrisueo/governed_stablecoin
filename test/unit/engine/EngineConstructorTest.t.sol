@@ -58,7 +58,7 @@ contract EngineConstructorTest is Test {
         // Verificación: Parámetros gobernables en valores por defecto
         assertEq(engine.getLiquidationThreshold(), 50); // 50%
         assertEq(engine.getLiquidationBonus(), 10); // 10%
-        assertEq(engine.getTargetHealthFactor(), 1.25e18); // 1.25
+        assertEq(engine.getTargetHealthFactor(), 0.90e18); // 0.90
         assertEq(engine.getMintFee(), 20); // 20 basis points
 
         // Verificación: El owner es el especificado

@@ -98,13 +98,6 @@ contract TestStableCoinEngine is ReentrancyGuard, Ownable {
     //* Constantes (no gobernables por seguridad)
 
     /**
-     * @dev Factor de salud mínimo permitido (con 18 decimales)
-     * 1e18 = 1.0, por debajo de esto la posición puede ser liquidada
-     * INMUTABLE: Cambiar esto podría causar liquidaciones masivas o insolvencia
-     */
-    uint256 private constant MIN_HEALTH_FACTOR = 1e18;
-
-    /**
      * @dev Precisión usada en todos los cálculos (18 decimales)
      * INMUTABLE: Cambiar esto rompería todos los cálculos del protocolo
      */
@@ -146,10 +139,10 @@ contract TestStableCoinEngine is ReentrancyGuard, Ownable {
 
     /**
      * @dev Cambio máximo permitido en targetHealthFactor por propuesta (con 18 decimales)
-     * 0.1e18 = 0.1, permite cambios de ±0.1 (ej: 1.25 → 1.15 o 1.35)
+     * 0.05e18 = 0.05, permite cambios de ±0.05 (ej: 0.90 → 0.85 o 0.95)
      * INMUTABLE: Protección contra ataques de governance. Se puede cambiar, pero no mucho de una vez
      */
-    uint256 private constant MAX_TARGET_HF_CHANGE = 0.1e18;
+    uint256 private constant MAX_TARGET_HF_CHANGE = 0.05e18;
 
     /**
      * @dev Cambio máximo permitido en mintFee por propuesta (basis points)
@@ -207,14 +200,15 @@ contract TestStableCoinEngine is ReentrancyGuard, Ownable {
 
     /**
      * @dev Health factor objetivo a restaurar tras liquidación parcial
-     * 1.25e18 = 1.25 con precisión de 18 decimales
-     * Proporciona un buffer de seguridad por encima del mínimo (1.0)
+     * 0.90e18 = 0.90 con precisión de 18 decimales
+     * Permite liquidaciones parciales cuando HF está entre 0.90 y 1.0
+     * El usuario liquidado queda con HF = 0.90 (aún liquidable, debe actuar rápido)
      *
-     * GOBERNABLE: La gobernanza puede ajustar entre 1.1 - 1.5 para gestionar agresividad de liquidación
-     * - Más alto (1.5) = liquidaciones más agresivas, mayor buffer de seguridad
-     * - Más bajo (1.1) = liquidaciones más conservadoras, menor impacto en usuarios
+     * GOBERNABLE: La gobernanza puede ajustar entre 0.75 - 1.0 para gestionar agresividad de liquidación
+     * - Más alto (1.0) = liquidaciones menos agresivas, usuario más cerca de seguridad
+     * - Más bajo (0.75) = liquidaciones más agresivas, mayor incentivo para liquidadores
      */
-    uint256 private s_targetHealthFactor = 1.25e18;
+    uint256 private s_targetHealthFactor = 0.90e18;
 
     /**
      * @dev Mint fee en basis points (20 = 0.2%)
@@ -401,7 +395,7 @@ contract TestStableCoinEngine is ReentrancyGuard, Ownable {
      * @dev Cobra un fee de minting que va al fondo de seguridad contra bad debt
      * @dev El usuario recibe: amountTscToMint - fee
      * @dev La deuda registrada es el monto NETO (lo que realmente recibe el usuario)
-     * @dev Revierte si el health factor resultante es menor a MIN_HEALTH_FACTOR
+     * @dev Revierte si el health factor resultante es menor a s_targetHealthFactor
      */
     function mintTsc(uint256 amountTscToMint) public moreThanZero(amountTscToMint) nonReentrant {
         // Calcula la fee y el monto neto a mintear
@@ -447,7 +441,7 @@ contract TestStableCoinEngine is ReentrancyGuard, Ownable {
     /**
      * @notice Rescata colateral depositado
      * @param amountCollateral Cantidad de WETH a rescatar
-     * @dev Revierte si el health factor resultante es menor a MIN_HEALTH_FACTOR
+     * @dev Revierte si el health factor resultante es menor a s_targetHealthFactor
      */
     function redeemCollateral(uint256 amountCollateral) public moreThanZero(amountCollateral) nonReentrant {
         _redeemCollateral(msg.sender, msg.sender, amountCollateral);
@@ -459,22 +453,22 @@ contract TestStableCoinEngine is ReentrancyGuard, Ownable {
      * @param user Dirección del usuario a liquidar
      * @dev El liquidador recibe el colateral correspondiente a la deuda cubierta + bonus (en WETH)
      * @dev Liquida SOLO la cantidad necesaria para restaurar el health factor a s_targetHealthFactor
-     * @dev Solo se puede liquidar si el health factor del usuario es < 1
+     * @dev Solo se puede liquidar si el health factor del usuario es < s_targetHealthFactor
      * @dev Si el colateral del usuario no alcanza para cubrir deuda + bonus, se usa el fondo de seguridad
      *
-     * Ejemplo de liquidación parcial:
+     * Ejemplo de liquidación parcial (con targetHF = 0.90):
      * - Usuario tiene 10 WETH de colateral ($20,000) y $16,000 de deuda (HF = 0.625)
-     * - Cálculo determina que liquidar $8,000 restaura HF a s_targetHealthFactor
-     * - Colateral para $8,000: 4 WETH
-     * - Bonus: 4 × 10% = 0.4 WETH
-     * - Liquidador paga: $8,000 en TSC y recibe: 4.4 WETH
-     * - Usuario queda con: 5.6 WETH, $8,000 de deuda y HF = s_targetHealthFactor
+     * - Cálculo determina que liquidar ~$10,900 restaura HF a 0.90
+     * - Colateral para $10,900: ~5.45 WETH
+     * - Bonus: 5.45 × 10% = 0.545 WETH
+     * - Liquidador paga: ~$10,900 en TSC y recibe: ~5.995 WETH
+     * - Usuario queda con: ~4.005 WETH, ~$5,100 de deuda y HF = 0.90 (aún liquidable)
      */
     function liquidate(address user) external nonReentrant {
-        // Comprueba que el usuario es liquidable (health factor < 1)
+        // Comprueba que el usuario es liquidable (health factor < targetHealthFactor)
         uint256 initialHealthFactor = _healthFactor(user);
 
-        if (initialHealthFactor >= MIN_HEALTH_FACTOR) {
+        if (initialHealthFactor >= s_targetHealthFactor) {
             revert TestStableCoinEngine__HealthFactorOk();
         }
 
@@ -711,11 +705,12 @@ contract TestStableCoinEngine is ReentrancyGuard, Ownable {
     /**
      * @dev Revierte la transacción si el health factor está roto
      * @param user Usuario a verificar
+     * @dev Verifica que HF >= s_targetHealthFactor (dinámico, gobernable entre 0.75-1.0)
      */
     function _revertIfHealthFactorIsBroken(address user) internal view {
         uint256 userHealthFactor = _healthFactor(user);
 
-        if (userHealthFactor < MIN_HEALTH_FACTOR) {
+        if (userHealthFactor < s_targetHealthFactor) {
             revert TestStableCoinEngine__BreaksHealthFactor(userHealthFactor);
         }
     }
@@ -821,23 +816,23 @@ contract TestStableCoinEngine is ReentrancyGuard, Ownable {
 
     /**
      * @notice Actualiza el target health factor (solo owner/gobernanza)
-     * @param newTarget Nuevo target health factor (1.1e18-1.5e18 recomendado)
+     * @param newTarget Nuevo target health factor (0.75e18-1.0e18 recomendado)
      * @dev Solo puede ser llamado por el owner (Timelock via gobernanza)
      *
      * VALIDACIONES:
-     * - Debe estar entre 1.1e18 y 1.5e18 (1.1 - 1.5 con 18 decimales)
-     * - Muy bajo (<1.1) = poco margen de seguridad
-     * - Muy alto (>1.5) = mayor impacto en usuarios
-     * - Cambio máximo: ±0.1e18 por propuesta (rate limiting)
+     * - Debe estar entre 0.75e18 y 1.0e18
+     * - Muy bajo (<0.75) = liquidaciones extremadamente agresivas, poco margen
+     * - Muy alto (>1.0) = liquidaciones parciales matemáticamente imposibles con threshold=50%
+     * - Cambio máximo: ±0.05e18 por propuesta (rate limiting)
      * - Cooldown mínimo: 15 días entre cambios (rate limiting)
      *
      * EJEMPLO:
-     * - newTarget = 1.1e18 → restaura HF a 1.1 (más conservador, menor impacto)
-     * - newTarget = 1.5e18 → restaura HF a 1.5 (más agresivo, mayor seguridad)
+     * - newTarget = 0.75e18 → restaura HF a 0.75 (muy agresivo)
+     * - newTarget = 0.95e18 → restaura HF a 0.95 (conservador)
      */
     function updateTargetHealthFactor(uint256 newTarget) external onlyOwner {
         // Comprobación de rango válido
-        if (newTarget < 1.1e18 || newTarget > 1.5e18) {
+        if (newTarget < 0.75e18 || newTarget > 1.0e18) {
             revert TestStableCoinEngine__InvalidGovernanceParameter();
         }
 
@@ -1010,7 +1005,7 @@ contract TestStableCoinEngine is ReentrancyGuard, Ownable {
 
     /**
      * @notice Obtiene el target health factor actual
-     * @return El target health factor (1.25e18 = 1.25)
+     * @return El target health factor (0.90e18 = 0.90)
      */
     function getTargetHealthFactor() external view returns (uint256) {
         return s_targetHealthFactor;
@@ -1025,11 +1020,12 @@ contract TestStableCoinEngine is ReentrancyGuard, Ownable {
     }
 
     /**
-     * @notice Obtiene el factor de salud mínimo
-     * @return El factor mínimo (1e18 = 1.0)
+     * @notice Obtiene el factor de salud mínimo (ahora dinámico)
+     * @return El target health factor actual (0.90e18 por defecto)
+     * @dev Anteriormente era una constante de 1e18, ahora es gobernable
      */
-    function getMinHealthFactor() external pure returns (uint256) {
-        return MIN_HEALTH_FACTOR;
+    function getMinHealthFactor() external view returns (uint256) {
+        return s_targetHealthFactor;
     }
 
     /**

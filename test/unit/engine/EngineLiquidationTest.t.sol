@@ -381,4 +381,113 @@ contract EngineLiquidationTest is Test {
         assertGt(engine.getHealthFactor(liquidator), 1e18);
         vm.stopPrank();
     }
+
+    /**
+     * @notice Verifica que la liquidación parcial funciona correctamente
+     * @dev Usuario con 0.611 < HF < 0.90 debe ser liquidado parcialmente (no totalmente)
+     * @dev Con targetHF = 0.90, threshold = 0.5, bonus = 0.1:
+     *      - Umbral para liquidación parcial: HF > (0.5 × 1.1) / 0.90 = 0.611
+     *      - Usuario es liquidable si: HF < 0.90
+     *      - Rango para liquidación PARCIAL: 0.611 < HF < 0.90
+     */
+    function test_Liquidate_PartialLiquidation_WhenHFInPartialRange() public {
+        // Setup: Usuario deposita colateral y mintea deuda
+        // Queremos HF inicial alto, luego bajarlo a ~0.85 (entre 0.611 y 0.90)
+        vm.startPrank(user);
+        engine.depositCollateral(10 ether); // $20,000 @ $2000/ETH
+        engine.mintTsc(3500e18); // ~$3,493 de deuda (con fee de 0.2%)
+        vm.stopPrank();
+
+        uint256 userDebtBefore = engine.getStablecoinMinted(user);
+
+        // HF inicial = (10 × $2000 × 0.5) / 3493 = $10,000 / 3493 ≈ 2.863 ✓
+
+        // Caída de precio para alcanzar HF ≈ 0.85 (en rango 0.611 < HF < 0.90)
+        // HF = (10 × P × 0.5) / 3493 = 0.85
+        // 5P = 2969
+        // P = $593.80
+
+        // Usamos $595 para simplificar:
+        // HF = (10 × $595 × 0.5) / 3493 = $2,975 / 3493 ≈ 0.8517 ✓
+        // Verificar condición: collateralValue × 0.5 > debt × 0.90
+        // $5,950 × 0.5 = $2,975
+        // $3,493 × 0.90 = $3,143.70
+        // $2,975 < $3,143.70 → AÚN NO cumple...
+
+        // Necesito MENOS deuda. Probemos con 3000 TSC:
+        // Deuda real ≈ 2,994 después de fee
+        // HF @ $595 = (10 × $595 × 0.5) / 2994 = $2,975 / 2994 ≈ 0.994 → NO LIQUIDABLE
+
+        // Probemos con $540:
+        // HF = (10 × $540 × 0.5) / 2994 = $2,700 / 2994 ≈ 0.902 → Muy cerca de 0.90
+
+        // Usamos $535:
+        // HF = (10 × $535 × 0.5) / 2994 = $2,675 / 2994 ≈ 0.893 < 0.90 ✓ LIQUIDABLE
+        // Condición parcial: $5,350 × 0.5 = $2,675 vs $2,994 × 0.90 = $2,694.60
+        // $2,675 < $2,694.60 → AÚN NO...
+
+        // Última prueba: 2500 TSC de deuda (≈2,495 después de fee)
+        // HF @ $450 = (10 × $450 × 0.5) / 2495 = $2,250 / 2495 ≈ 0.902 → NO LIQUIDABLE
+        // HF @ $445 = (10 × $445 × 0.5) / 2495 = $2,225 / 2495 ≈ 0.892 < 0.90 ✓ LIQUIDABLE
+        // Condición: $4,450 × 0.5 = $2,225 vs $2,495 × 0.90 = $2,245.50
+        // $2,225 < $2,245.50 → NO cumple aún
+
+        // OK, necesito optimizar. Usemos 2000 TSC (≈1,996 después de fee):
+        // Para HF = 0.85: (10 × P × 0.5) / 1996 = 0.85 → P = $339.13
+        priceFeed.updateAnswer(340e8);
+
+        uint256 hfBeforeLiq = engine.getHealthFactor(user);
+        uint256 targetHF = engine.getTargetHealthFactor();
+
+        // Verificar que HF está en el rango de liquidación PARCIAL
+        assertLt(hfBeforeLiq, targetHF, "HF debe ser < targetHF (0.90) para ser liquidable");
+        assertGt(hfBeforeLiq, 0.611e18, "HF debe ser > 0.611 para liquidacion parcial");
+
+        // Verificar condición matemática para liquidación parcial:
+        // collateralValue × 0.5 > debt × 0.90
+        uint256 collateralValue = engine.getAccountCollateralValue(user);
+        uint256 adjustedCollateral = (collateralValue * 50) / 100; // threshold 50%
+        uint256 debtComponent = (userDebtBefore * targetHF) / 1e18;
+        assertGt(adjustedCollateral, debtComponent, "Debe cumplir condicion de liquidacion parcial");
+
+        // Setup liquidador
+        vm.startPrank(liquidator);
+        engine.depositCollateral(50 ether);
+        engine.mintTsc(userDebtBefore + 1000e18);
+        tsc.approve(address(engine), type(uint256).max);
+
+        uint256 liquidatorTscBefore = tsc.balanceOf(liquidator);
+        uint256 userCollateralBefore = engine.getCollateralBalanceOfUser(user);
+
+        // Ejecutar liquidación
+        engine.liquidate(user);
+        vm.stopPrank();
+
+        // Verificaciones post-liquidación
+        uint256 userDebtAfter = engine.getStablecoinMinted(user);
+        uint256 userCollateralAfter = engine.getCollateralBalanceOfUser(user);
+        uint256 hfAfterLiq = engine.getHealthFactor(user);
+
+        // 1. Usuario AÚN tiene deuda (liquidación parcial, no total)
+        assertGt(userDebtAfter, 0, "Debe quedar deuda (liquidacion parcial)");
+        assertLt(userDebtAfter, userDebtBefore, "Deuda debe reducirse");
+
+        // 2. Usuario perdió colateral pero no todo
+        assertLt(userCollateralAfter, userCollateralBefore, "Debe perder colateral");
+        assertGt(userCollateralAfter, 0, "Debe quedar colateral");
+
+        // 3. HF restaurado por encima del target (> 0.90)
+        assertGt(hfAfterLiq, targetHF, "HF debe ser > targetHF despues de liquidacion");
+
+        // 4. Usuario NO es liquidable ahora (HF >= targetHF)
+        vm.startPrank(liquidator);
+        vm.expectRevert(TestStableCoinEngine.TestStableCoinEngine__HealthFactorOk.selector);
+        engine.liquidate(user);
+        vm.stopPrank();
+
+        // 5. Liquidador pagó TSC y recibió colateral + bonus
+        uint256 tscPaid = liquidatorTscBefore - tsc.balanceOf(liquidator);
+        assertGt(tscPaid, 0, "Liquidador debe haber pagado TSC");
+        assertLt(tscPaid, userDebtBefore, "No debe pagar toda la deuda (parcial)");
+    }
 }

@@ -229,8 +229,8 @@ contract EngineGovernanceTest is Test {
      * @dev El target HF debe cambiar al nuevo valor especificado
      */
     function test_UpdateTargetHF_UpdatesCorrectly() public {
-        // Setup: Nuevo target válido (1.25e18 -> 1.30e18)
-        uint256 newTarget = 1.30e18;
+        // Setup: Nuevo target válido (0.90e18 -> 0.85e18)
+        uint256 newTarget = 0.85e18;
 
         // Acción: Owner actualiza target HF
         vm.prank(owner);
@@ -241,36 +241,36 @@ contract EngineGovernanceTest is Test {
     }
 
     /**
-     * @notice Verifica que updateTargetHF revierte cuando el valor es menor a 1.1e18
-     * @dev Target HF mínimo = 1.1 (liquidaciones más conservadoras)
+     * @notice Verifica que updateTargetHF revierte cuando el valor es menor a 0.75e18
+     * @dev Target HF mínimo = 0.75 (liquidaciones muy agresivas)
      */
     function test_UpdateTargetHF_RevertsWhen_BelowMin() public {
-        // Acción + Verificación: Target < 1.1e18 debe revertir
+        // Acción + Verificación: Target < 0.75e18 debe revertir
         vm.prank(owner);
         vm.expectRevert(TestStableCoinEngine.TestStableCoinEngine__InvalidGovernanceParameter.selector);
-        engine.updateTargetHealthFactor(1.09e18);
+        engine.updateTargetHealthFactor(0.74e18);
     }
 
     /**
-     * @notice Verifica que updateTargetHF revierte cuando el valor es mayor a 1.5e18
-     * @dev Target HF máximo = 1.5 (liquidaciones más agresivas)
+     * @notice Verifica que updateTargetHF revierte cuando el valor es mayor a 1.0e18
+     * @dev Target HF máximo = 1.0 (liquidaciones parciales imposibles si mayor)
      */
     function test_UpdateTargetHF_RevertsWhen_AboveMax() public {
-        // Acción + Verificación: Target > 1.5e18 debe revertir
+        // Acción + Verificación: Target > 1.0e18 debe revertir
         vm.prank(owner);
         vm.expectRevert(TestStableCoinEngine.TestStableCoinEngine__InvalidGovernanceParameter.selector);
-        engine.updateTargetHealthFactor(1.51e18);
+        engine.updateTargetHealthFactor(1.01e18);
     }
 
     /**
-     * @notice Verifica que updateTargetHF revierte cuando el cambio excede ±0.1e18
-     * @dev MAX_TARGET_HF_CHANGE = 0.1e18 (previene cambios drásticos)
+     * @notice Verifica que updateTargetHF revierte cuando el cambio excede ±0.05e18
+     * @dev MAX_TARGET_HF_CHANGE = 0.05e18 (previene cambios drásticos)
      */
     function test_UpdateTargetHF_RevertsWhen_ChangeExceedsMax() public {
-        // Acción + Verificación: Cambio de 1.25 -> 1.36 (+0.11) debe revertir
+        // Acción + Verificación: Cambio de 0.90 -> 0.96 (+0.06) debe revertir
         vm.prank(owner);
         vm.expectRevert(TestStableCoinEngine.TestStableCoinEngine__ChangeExceedsMaximum.selector);
-        engine.updateTargetHealthFactor(1.36e18);
+        engine.updateTargetHealthFactor(0.96e18);
     }
 
     // ============================================
