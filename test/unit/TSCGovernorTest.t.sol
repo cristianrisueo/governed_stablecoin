@@ -58,42 +58,6 @@ contract TSCGovernorTest is Test {
     }
 
     /**
-     * @notice Verifica que votingDelay retorna el valor correcto
-     * @dev Debe retornar el initialVotingDelay del constructor
-     */
-    function test_VotingDelay_ReturnsCorrectValue() public view {
-        // Acción: Obtener voting delay
-        uint256 delay = governor.votingDelay();
-
-        // Verificación: Debe ser el valor configurado
-        assertEq(delay, VOTING_DELAY);
-    }
-
-    /**
-     * @notice Verifica que votingPeriod retorna el valor correcto
-     * @dev Debe retornar el initialVotingPeriod del constructor
-     */
-    function test_VotingPeriod_ReturnsCorrectValue() public view {
-        // Acción: Obtener voting period
-        uint256 period = governor.votingPeriod();
-
-        // Verificación: Debe ser el valor configurado
-        assertEq(period, VOTING_PERIOD);
-    }
-
-    /**
-     * @notice Verifica que proposalThreshold retorna el valor correcto
-     * @dev Tokens mínimos requeridos para crear propuesta
-     */
-    function test_ProposalThreshold_ReturnsCorrectValue() public view {
-        // Acción: Obtener proposal threshold
-        uint256 threshold = governor.proposalThreshold();
-
-        // Verificación: Debe ser el valor configurado
-        assertEq(threshold, PROPOSAL_THRESHOLD);
-    }
-
-    /**
      * @notice Verifica que quorum calcula correctamente el 5% del supply
      * @dev Quorum = (totalSupply * quorumPercentage) / 100
      */

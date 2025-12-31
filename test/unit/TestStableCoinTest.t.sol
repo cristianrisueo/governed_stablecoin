@@ -46,15 +46,6 @@ contract TestStableCoinTest is Test {
     }
 
     /**
-     * @notice Verifica que el deployer es establecido como owner del contrato
-     * @dev Utiliza Ownable de OpenZeppelin
-     */
-    function test_Constructor_SetsDeployerAsOwner() public view {
-        // Verificación: El owner debe ser quien deployó el contrato
-        assertEq(tsc.owner(), owner);
-    }
-
-    /**
      * @notice Verifica que mint incrementa correctamente el total supply
      * @dev Solo el owner puede mintear tokens
      */

@@ -678,9 +678,11 @@ contract TestStableCoinEngine is ReentrancyGuard, Ownable {
         uint256 numerator = (totalCollateralValue * thresholdMultiplier) / PRECISION;
         uint256 debtComponent = (totalDebt * s_targetHealthFactor) / PRECISION;
 
-        // Si el numerador es negativo, no se necesita liquidación
+        // Si numerador <= debtComponent, la liquidación parcial no es matemáticamente posible
+        // Esto ocurre cuando el usuario está muy sub-colateralizado (HF < threshold × (1 + bonus) / targetHF)
+        // En este caso, se necesita liquidación total
         if (numerator <= debtComponent) {
-            return 0;
+            return totalDebt;
         }
 
         numerator = numerator - debtComponent;

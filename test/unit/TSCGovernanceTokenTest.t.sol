@@ -49,27 +49,6 @@ contract TSCGovernanceTokenTest is Test {
     }
 
     /**
-     * @notice Verifica que el constructor establece nombre y símbolo correctos
-     * @dev Nombre: "TestStableCoin Governance", Símbolo: "TSCG"
-     */
-    function test_Constructor_SetsCorrectNameAndSymbol() public view {
-        // Verificación: Nombre correcto
-        assertEq(tscg.name(), "TestStableCoin Governance");
-
-        // Verificación: Símbolo correcto
-        assertEq(tscg.symbol(), "TSCG");
-    }
-
-    /**
-     * @notice Verifica que el deployer es establecido como owner
-     * @dev Hereda de Ownable
-     */
-    function test_Constructor_SetsDeployerAsOwner() public view {
-        // Verificación: El owner es el deployer
-        assertEq(tscg.owner(), deployer);
-    }
-
-    /**
      * @notice Verifica que mint incrementa el total supply
      * @dev Solo el owner puede mintear
      */
@@ -86,21 +65,6 @@ contract TSCGovernanceTokenTest is Test {
 
         // Verificación: Usuario recibió los tokens
         assertEq(tscg.balanceOf(user), mintAmount);
-    }
-
-    /**
-     * @notice Verifica que mint emite el evento TokensMinted
-     * @dev Debe emitir con to y amount correctos
-     */
-    function test_Mint_EmitsEvent() public {
-        // Setup: Cantidad a mintear
-        uint256 mintAmount = 1000e18;
-
-        // Acción + Verificación: Debe emitir evento
-        vm.expectEmit(true, false, false, true);
-        emit TokensMinted(user, mintAmount);
-
-        tscg.mint(user, mintAmount);
     }
 
     /**

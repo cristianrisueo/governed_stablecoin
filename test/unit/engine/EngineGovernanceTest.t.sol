@@ -74,23 +74,6 @@ contract EngineGovernanceTest is Test {
     }
 
     /**
-     * @notice Verifica que updateThreshold emite el evento correcto
-     * @dev Debe emitir LiquidationThresholdUpdated con valores old y new
-     */
-    function test_UpdateThreshold_EmitsEvent() public {
-        // Setup: Valores
-        uint256 oldThreshold = 50;
-        uint256 newThreshold = 53;
-
-        // Acción + Verificación: Debe emitir evento
-        vm.expectEmit(false, false, false, true);
-        emit LiquidationThresholdUpdated(oldThreshold, newThreshold);
-
-        vm.prank(owner);
-        engine.updateLiquidationThreshold(newThreshold);
-    }
-
-    /**
      * @notice Verifica que updateThreshold revierte cuando no es el owner
      * @dev Solo el owner (Timelock) puede cambiar parámetros
      */

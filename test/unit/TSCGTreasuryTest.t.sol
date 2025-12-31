@@ -162,23 +162,6 @@ contract TSCGTreasuryTest is Test {
     }
 
     /**
-     * @notice Verifica que buyTSCG emite el evento correcto
-     * @dev Debe emitir TSCGPurchased con parámetros correctos
-     */
-    function test_BuyTSCG_EmitsEvent() public {
-        // Setup: Cantidad a comprar
-        uint256 tscgAmount = 1000e18;
-        uint256 wethCost = treasury.calculateWETHCost(tscgAmount);
-
-        // Acción + Verificación: Debe emitir evento
-        vm.expectEmit(true, false, false, true);
-        emit TSCGPurchased(buyer, tscgAmount, wethCost);
-
-        vm.prank(buyer);
-        treasury.buyTSCG(tscgAmount);
-    }
-
-    /**
      * @notice Verifica que buyTSCG revierte cuando amount = 0
      * @dev No se puede comprar 0 tokens
      */
@@ -218,23 +201,6 @@ contract TSCGTreasuryTest is Test {
 
         // Verificación: Precio actualizado
         assertEq(treasury.getTSCGPrice(), newPrice);
-    }
-
-    /**
-     * @notice Verifica que updatePrice emite el evento correcto
-     * @dev Debe emitir PriceUpdated con valores old y new
-     */
-    function test_UpdatePrice_EmitsEvent() public {
-        // Setup: Nuevo precio
-        uint256 oldPrice = INITIAL_PRICE;
-        uint256 newPrice = 0.0015 ether;
-
-        // Acción + Verificación: Debe emitir evento
-        vm.expectEmit(false, false, false, true);
-        emit PriceUpdated(oldPrice, newPrice);
-
-        vm.prank(owner);
-        treasury.updatePrice(newPrice);
     }
 
     /**

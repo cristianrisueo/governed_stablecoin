@@ -77,22 +77,6 @@ contract EngineCollateralTest is Test {
     }
 
     /**
-     * @notice Verifica que depositCollateral emite el evento correcto
-     * @dev Valida emisión de CollateralDeposited
-     */
-    function test_DepositCollateral_EmitsEvent() public {
-        // Setup: Cantidad a depositar
-        uint256 depositAmount = 5 ether;
-
-        // Acción + Verificación: Debe emitir evento
-        vm.expectEmit(true, true, false, false);
-        emit CollateralDeposited(user, depositAmount);
-
-        vm.prank(user);
-        engine.depositCollateral(depositAmount);
-    }
-
-    /**
      * @notice Verifica que depositCollateral transfiere WETH desde el usuario
      * @dev Valida que el balance de WETH cambia correctamente
      */

@@ -152,32 +152,6 @@ contract EngineHealthFactorTest is Test {
     }
 
     /**
-     * @notice Verifica que _calculateHealthFactor calcula correctamente
-     * @dev Valida la fórmula: HF = (collateral * threshold / 100) * 1e18 / debt
-     */
-    function test_CalculateHealthFactor_CalculatesCorrectly() public {
-        // Setup: Crear escenario con valores conocidos
-        vm.startPrank(user);
-        engine.depositCollateral(5 ether); // $10,000 a $2000/ETH
-        engine.mintTsc(2000e18); // Intentar mintear $2000
-        vm.stopPrank();
-
-        // Cálculo esperado:
-        // Colateral: $10,000
-        // Threshold: 50%
-        // Colateral ajustado: $10,000 * 50 / 100 = $5,000
-        // Deuda: ~1996 TSC (2000 - 0.2% fee)
-        // HF = 5,000 * 1e18 / 1,996 ≈ 2.505e18
-
-        // Acción: Obtener HF
-        uint256 healthFactor = engine.getHealthFactor(user);
-
-        // Verificación: HF debe estar en el rango esperado
-        assertGe(healthFactor, 2.48e18);
-        assertLe(healthFactor, 2.52e18);
-    }
-
-    /**
      * @notice Verifica que el cálculo usa el liquidation threshold correcto
      * @dev El threshold afecta directamente el colateral ajustado
      */

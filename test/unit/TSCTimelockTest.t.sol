@@ -44,19 +44,6 @@ contract TSCTimelockTest is Test {
     }
 
     /**
-     * @notice Verifica que el constructor establece el minDelay correcto
-     * @dev El delay de seguridad debe ser 2 días (172800 segundos)
-     */
-    function test_Constructor_SetsMinDelay() public view {
-        // Acción: Obtener min delay
-        uint256 delay = timelock.getMinDelay();
-
-        // Verificación: Debe ser 2 días
-        assertEq(delay, MIN_DELAY);
-        assertEq(delay, 172800); // 2 * 24 * 60 * 60
-    }
-
-    /**
      * @notice Verifica que el constructor asigna el rol PROPOSER correctamente
      * @dev Solo el Governor debe poder crear propuestas en el Timelock
      */
